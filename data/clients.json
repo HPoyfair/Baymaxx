@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "clients": [
+    {
+      "id": "26b21efe-028f-4cc9-b5cd-ac73090b5847",
+      "name": "Community Medical Group",
+      "notes": "Main account",
+      "offices": [
+        {
+          "id": "6ecba2ef-5afc-4713-936f-42ed456e1c6a",
+          "name": "North Clinic",
+          "phone": "555-111-2222",
+          "email": ""
+        },
+        {
+          "id": "7d293b8e-1634-428f-9f37-59ad204629aa",
+          "name": "West Clinic",
+          "phone": "555-333-4444",
+          "email": "west@cmg.com"
+        }
+      ]
+    },
+    {
+      "id": "eacc6ec7-4113-4083-9f2a-fe1118e7718a",
+      "name": "Fresno Digestive Health",
+      "notes": "GI",
+      "offices": []
+    }
+  ]
+}

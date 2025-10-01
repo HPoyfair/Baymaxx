@@ -1,44 +1,120 @@
 import tkinter as tk
 from tkinter import ttk
+from pathlib import Path
+from PIL import Image, ImageTk
 
 
 
 class App(tk.Tk):
+
     def __init__(self):
         super().__init__()
 
         # --- windo basics ---
         self.title("Baymaxx") #title
-        self.geometry("600x400") #window size
+        self.geometry("700x500") #window size
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight= 1)
+        self.rowconfigure(0, weight= 0)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight= 1)
+
+
+
+        # -- wrapper --
+        wrapper = tk.Frame(self, padx = 1, pady = 1)
+        wrapper.grid(row = 1, column = 0, sticky = "nsew", padx = 10, pady = 10)
+        wrapper.columnconfigure(0, weight =1)
+        wrapper.rowconfigure(0, weight =1)
 
         # ---content frame----
-        content = ttk.Frame(self, padding=20)
-        content.grid(row = 0, column= 0, sticky ="nsew")
+        left_frame = ttk.Frame(wrapper, padding=20, borderwidth = 1, relief = "solid")
+        left_frame.grid(row = 0, column= 0, sticky ="nsew")
+        left_frame.grid_columnconfigure(0, weight = 1)
 
         # -- label and button ---
         self.status = tk.StringVar(value="Ready")
-        title = ttk.Label(content, text = "testing", font =("",30, "bold"))
-        title.grid(row=10, column =0, sticky="w")
+        #title = ttk.Label(left_frame , text = "testing", font =("",30, "bold"))
+        #title.grid(row = 0, column =0, sticky="w")
+
+
+        #-- counter label --
+        self.counter = 0
+        self.counter_label= ttk.Label(left_frame , text = f"count: {self.counter}")
+        #self.counter_label.grid(row = 1, column = 0, sticky = "w", pady = (12, 0))
 
         # --- button ---
-        self.counter = 0
-        inc_btn = ttk.Button(content, text = "inc", command = self.increment)
-        inc_btn.grid(row=0, column =0, sticky= "e")
+
+        btns = ttk.Frame(left_frame)
+        btns.grid(row = 0, column =0, sticky= "nsew", pady = 8)
+
+        btns.grid_columnconfigure(0, weight = 1)
+        btns.grid_columnconfigure(1, weight = 1)
+        btns.grid_columnconfigure(2, weight = 1)
+
+        
+        c_new_m_invoice = ttk.Button(btns , text = "New Month Invoice")
+        view_old= ttk.Button(btns, text = "View Past Invoices")
+        c_indiv= ttk.Button(btns , text = "New Individual Invoice")
+        v_clients = ttk.Button(btns, text = "View Clients")
+    
+        c_new_m_invoice.grid(row=0, column =1,  pady = 5)
+        view_old.grid(row=1, column =1,  pady = 5)
+        c_indiv.grid(row=2, column =1,  pady = 5)
+        v_clients.grid(row=3, column =1,  pady = 5)
+
+        # -- right frame ---
+        right_frame = ttk.Frame(self, padding = 20, borderwidth = 1, relief = "solid")
+        right_frame.grid(row = 1 ,column = 1, sticky ="nsew", padx =10, pady = 10)
+
+
+        # -- Top Bar ---
+
+        topbar = ttk.Frame(self, padding = (12,8), borderwidth = 1, relief = "solid")
+        topbar.grid(row= 0, column = 0, columnspan =2, sticky = "ew")
+
+
+       
+
+
+
+
+
+        #-- logo --
+        logo_path = Path(__file__).resolve().parent / "baymaxx.png"
+        try:
+            
+
+            self.logo_img = self.load_logo(logo_path, max_w = 360, max_h = 360)
+            ttk.Label(right_frame, image = self.logo_img).grid(row =0, column = 0 , sticky = "se")
+
+
+        except Exception as e:
+            ttk.Label(right_frame, text = "logo missing").grid(row = 1, column = 1, sticky = "se")
+
+        
+
+
+
+
 
         # ---status bar---
         statusbar = ttk.Frame(self, padding = (12,6))
-        statusbar.grid(row = 1, column = 0, sticky ="ew")
-        statusbar.columnconfigure(0, weight = 1)
-        ttk.Label(statusbar, textvariable = self.status, anchor ="w").grid(row = 0, column = 0, sticky = "e")
+        statusbar.grid(row= 0, column= 0, sticky = "n")
+
+        help_label = ttk.Label(statusbar, text = "help").grid(row=0, column = 0, sticky= "nw")
+       
 
 
-    def increment(self):
-        
-        self.counter += 1
-        self.counter_label.config(text = f"Count: {self.counter}")
-        self.status.set ("button clicked")
+   
+    def load_logo(self,path, max_w =360, max_h = 360):
+        img = Image.open(path)
+        img.thumbnail((max_w, max_h), Image.LANCZOS)
+        return ImageTk.PhotoImage(img)
+    
+
+   
+
+       
 
 
 
