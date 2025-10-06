@@ -1,7 +1,8 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from pathlib import Path
 from PIL import Image, ImageTk
+import view_clients as clients
 
 
 
@@ -55,7 +56,7 @@ class App(tk.Tk):
         c_new_m_invoice = ttk.Button(btns , text = "New Month Invoice")
         view_old= ttk.Button(btns, text = "View Past Invoices")
         c_indiv= ttk.Button(btns , text = "New Individual Invoice")
-        v_clients = ttk.Button(btns, text = "View Clients")
+        v_clients = ttk.Button(btns, text = "View Clients", command = self.open_clients_manager)
     
         c_new_m_invoice.grid(row=0, column =1,  pady = 5)
         view_old.grid(row=1, column =1,  pady = 5)
@@ -111,12 +112,74 @@ class App(tk.Tk):
         img.thumbnail((max_w, max_h), Image.LANCZOS)
         return ImageTk.PhotoImage(img)
     
-
-   
-
-       
+    def open_clients_manager(self):
+        ClientsManager(self)
 
 
+
+class ClientsManager(tk.Toplevel):
+    """Simple manager window to list/add/edit/delete clients stored in clients.json"""
+
+    def __init__(self, parent: tk.Tk):
+        super().__init__(parent)
+        self.title("Clients")
+        self.geometry("560x380")
+        self.transient(parent)     # stay on top of the main window
+        self.grab_set()            # modal-ish: focus this window
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        # ---- Tree (list of clients)
+        cols = ("name", "offices", "notes")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=12)
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 6))
+
+        self.tree.heading("name", text="Name")
+        self.tree.heading("offices", text="# Offices")
+        self.tree.heading("notes", text="Notes")
+        self.tree.column("name", width=200, anchor="w")
+        self.tree.column("offices", width=80, anchor="center")
+        self.tree.column("notes", width=240, anchor="w")
+
+        ybar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        ybar.grid(row=0, column=1, sticky="ns", pady=(12, 6))
+        self.tree.configure(yscrollcommand=ybar.set)
+
+        # Double-click to edit
+        self.tree.bind("<Double-1>", lambda e: self.edit_selected())
+
+        # ---- Buttons
+        btns = ttk.Frame(self, padding=(12, 6))
+        btns.grid(row=1, column=0, columnspan=2, sticky="ew")
+        for i in range(5):
+            btns.columnconfigure(i, weight=1)
+
+        ttk.Button(btns, text="Add", command=self.add_client).grid(row=0, column=0, sticky="ew", padx=4)
+        ttk.Button(btns, text="Edit", command=self.edit_selected).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(btns, text="Delete", command=self.delete_selected).grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(btns, text="Refresh", command=self.refresh).grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=4, sticky="ew", padx=4)
+
+        self.refresh()
+
+    # -------- data <-> tree helpers --------
+
+    def refresh(self):
+        """Reload clients.json and repopulate the tree."""
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+
+        data = clients.list_clients()
+        for c in data:
+            name = c.get("name", "")
+            notes = c.get("notes", "")
+            offices = len(c.get("offices", []))
+            # store client_id as the item iid for easy retrieval
+            self.tree.insert("", tk.END, iid=c["id"], values=(name, offices, notes))
+
+  
+
+  
 
 def main():
     app = App()
