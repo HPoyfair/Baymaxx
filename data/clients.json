@@ -1,4 +1,20 @@
 {
   "version": 1,
-  "clients": []
+  "clients": [
+    {
+      "id": "cb83892c-df7c-46d6-9345-7d2f32dfe5be",
+      "name": "BUTTS INC",
+      "suborgs": []
+    },
+    {
+      "id": "31cf366b-7ebe-4182-8481-2f173d555c9e",
+      "name": "poopy",
+      "suborgs": []
+    },
+    {
+      "id": "1830a6db-5869-4c0a-8f61-12d0cc022aba",
+      "name": "poopy",
+      "suborgs": []
+    }
+  ]
 }
