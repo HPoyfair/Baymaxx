@@ -5,6 +5,10 @@ from pathlib import Path
 from PIL import Image, ImageTk
 import view_clients as clients
 
+import invoicing as inv
+from tkinter import filedialog
+
+
 
 class App(tk.Tk):
     def __init__(self):
@@ -27,8 +31,12 @@ class App(tk.Tk):
         sidebar = ttk.Frame(self, padding=(10, 10))
         sidebar.grid(row=1, column=0, sticky="nsw")
         # stack buttons vertically with consistent spacing
-        ttk.Button(sidebar, text="New Month Invoice").pack(fill="x", pady=6)
-        ttk.Button(sidebar, text="View Past Invoices").pack(fill="x", pady=6)
+        ttk.Button(sidebar, text="New Month Invoice",
+           command=self.show_monthly_import).pack(fill="x", pady=6)
+
+        ttk.Button(sidebar, text="View Past Invoices",
+           command=self.show_invoices).pack(fill="x", pady=6)
+
         ttk.Button(sidebar, text="New Individual Invoice").pack(fill="x", pady=6)
         ttk.Button(sidebar, text="View Clients", command=self.open_clients_manager).pack(fill="x", pady=6)
 
@@ -54,6 +62,35 @@ class App(tk.Tk):
 
     def open_clients_manager(self):
         ClientsManager(self)
+
+    def _set_content(self, widget: tk.Widget) -> None:
+        """Replace whatever is in the right pane with `widget`."""
+        for child in self.content.winfo_children():
+            child.destroy()
+        widget.grid(row=0, column=0)  # centered by grid weights
+    
+    def show_home(self) -> None:
+    # restore the logo content
+        for child in self.content.winfo_children():
+            child.destroy()
+        logo_path = Path(__file__).resolve().parent / "baymaxx.png"
+        try:
+            self.logo_img = self.load_logo(logo_path, max_w=420, max_h=420)
+            ttk.Label(self.content, image=self.logo_img).grid(row=0, column=0)
+        except Exception:
+            ttk.Label(self.content, text="Baymaxx", font=("", 28, "bold")).grid(row=0, column=0)
+
+    def show_monthly_import(self) -> None:
+        view = MonthlyImportView(self.content, on_back=self.show_home)
+        self._set_content(view)
+
+    def show_invoices(self) -> None:
+        view = ViewInvoicesView(self.content, on_back=self.show_home)
+        self._set_content(view)
+    
+
+
+
 
 
 # ---------------- Clients Manager ----------------
@@ -471,7 +508,155 @@ class SitesManager(tk.Toplevel):
         if not clients.delete_site(self.client_id, self.division_id, sid):
             messagebox.showerror("Delete Site", "Delete failed.")
         self.refresh()
+class MonthlyImportView(ttk.Frame):
+    """
+    Right-pane view for importing CSVs for a monthly invoice.
+    Lets the user add/remove CSV files and shows detected type + phone + match.
+    """
+    def __init__(self, parent: tk.Widget, on_back):
+        super().__init__(parent, padding=12)
+        self.on_back = on_back
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
+        # Header
+        hdr = ttk.Frame(self)
+        hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(hdr, text="New Monthly Invoice", font=("", 14, "bold")).pack(side="left")
+        ttk.Button(hdr, text="Back", command=self.on_back).pack(side="right")
+
+        # Table of selected files
+        cols = ("file", "type", "phone", "match")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=12)
+        for c, w, a in (("file", 340, "w"), ("type", 90, "center"), ("phone", 120, "center"), ("match", 240, "w")):
+            self.tree.heading(c, text=c.capitalize())
+            self.tree.column(c, width=w, anchor=a)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+
+        ybar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        ybar.grid(row=1, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=ybar.set)
+
+        # Buttons
+        btns = ttk.Frame(self)
+        btns.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        for i in range(3): btns.columnconfigure(i, weight=1)
+        ttk.Button(btns, text="Add CSV Files…", command=self.add_files).grid(row=0, column=0, sticky="ew", padx=4)
+        ttk.Button(btns, text="Remove Selected", command=self.remove_selected).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(btns, text="Clear All", command=self.clear_all).grid(row=0, column=2, sticky="ew", padx=4)
+
+    def add_files(self):
+        paths = filedialog.askopenfilenames(
+            title="Select CSV files",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not paths:
+            return
+
+        # load clients snapshot for matching
+        clients_doc = clients.load_clients()
+
+        for p in paths:
+            pth = Path(p)
+            # Ask invoicing helper to detect type + phone + match
+            try:
+                info = inv.identify_csv_and_phone(pth, clients_doc)
+                # info example: {"kind": "sms"|"call"|"unknown", "phone": "+15551234567", "match": {client/division/site…}}
+                kind = info.get("kind", "unknown")
+                phone = info.get("phone", "")
+                match = info.get("match") or {}
+                match_str = self._format_match(match)
+            except Exception as e:
+                kind, phone, match_str = "error", "", f"Error: {e}"
+
+            self.tree.insert(
+                "", tk.END,
+                values=(pth.name, kind, phone, match_str),
+                tags=("path",)
+            )
+            # stash full path on the item for later processing
+            last = self.tree.get_children()[-1]
+            self.tree.set(last, column="file", value=str(pth))  # keep full path in file column
+
+    def _format_match(self, match: dict) -> str:
+        if not isinstance(match, dict) or not match:
+            return ""
+        # Build a short breadcrumb like: Client > Division > Site
+        parts = [
+            match.get("client_name", ""),
+            match.get("division_name", ""),
+            match.get("site_name", ""),
+        ]
+        return " > ".join([p for p in parts if p])
+
+    def remove_selected(self):
+        for iid in self.tree.selection():
+            self.tree.delete(iid)
+
+    def clear_all(self):
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+
+
+class ViewInvoicesView(ttk.Frame):
+    """Simple list of saved invoices using invoicing.list_invoices()."""
+    def __init__(self, parent: tk.Widget, on_back):
+        super().__init__(parent, padding=12)
+        self.on_back = on_back
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        # Header
+        hdr = ttk.Frame(self)
+        hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(hdr, text="Past Invoices", font=("", 14, "bold")).pack(side="left")
+        ttk.Button(hdr, text="Back", command=self.on_back).pack(side="right")
+
+        # Table
+        cols = ("id", "type", "period", "client", "total")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
+        self.tree.heading("id", text="ID")
+        self.tree.heading("type", text="Type")
+        self.tree.heading("period", text="Period")
+        self.tree.heading("client", text="Client")
+        self.tree.heading("total", text="Total")
+        self.tree.column("id", width=220, anchor="w")
+        self.tree.column("type", width=80, anchor="center")
+        self.tree.column("period", width=120, anchor="center")
+        self.tree.column("client", width=220, anchor="w")
+        self.tree.column("total", width=100, anchor="e")
+        self.tree.grid(row=1, column=0, sticky="nsew")
+
+        ybar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        ybar.grid(row=1, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=ybar.set)
+
+        self.refresh()
+
+    def refresh(self):
+        # Clear existing
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+
+        # Load from invoicing module
+        try:
+            lst = inv.list_invoices()
+        except Exception as e:
+            messagebox.showerror("Invoices", f"Failed to load invoices:\n{e}")
+            return
+
+        # Populate
+        for item in lst:
+            pid = item.get("id", "")
+            ptype = item.get("type", "")
+            period = item.get("period") or {}
+            if isinstance(period, dict) and "year" in period and "month" in period:
+                ptxt = f"{period['year']}-{int(period['month']):02d}"
+            else:
+                ptxt = ""
+            client = item.get("client_name", "") or item.get("client_id", "")
+            total = item.get("total", 0.0)
+            self.tree.insert("", tk.END, values=(pid, ptype, ptxt, client, f"{total:,.2f}"))
 
 def main():
     app = App()
