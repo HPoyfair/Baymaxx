@@ -1,0 +1,24 @@
+{
+  "id": "invoice_2025_05",
+  "type": "monthly",
+  "period": {
+    "year": 2025,
+    "month": 5
+  },
+  "date": "10/28/2025",
+  "client": {},
+  "client_name_snapshot": "Sante Foundation Medical Group (\"SFMG\")",
+  "line_items": [
+    {
+      "description": "WOMENS SPECIALTY AND FERTILITY CLINIC VOICE (-7700)",
+      "qty": 336,
+      "unit_price": 0.14,
+      "amount": 47.04
+    }
+  ],
+  "subtotal": 47.04,
+  "tax": 0.0,
+  "total": 47.04,
+  "starting_invoice_number": 6,
+  "site_phones": {}
+}

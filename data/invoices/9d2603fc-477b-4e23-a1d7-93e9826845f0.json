@@ -1,0 +1,27 @@
+{
+  "id": "9d2603fc-477b-4e23-a1d7-93e9826845f0",
+  "type": "monthly",
+  "period": {
+    "year": 2025,
+    "month": 5
+  },
+  "client_id": null,
+  "client_name_snapshot": null,
+  "created_at": null,
+  "tax_rate": 0.0,
+  "line_items": [
+    {
+      "description": "WOMENS SPECIALTY AND FERTILITY CLINIC VOICE — Voice",
+      "qty": 336.0,
+      "unit_price": 0.14,
+      "amount": 47.04
+    }
+  ],
+  "totals": {
+    "subtotal": 47.04,
+    "tax": 0.0,
+    "total": 47.04
+  },
+  "notes": "",
+  "starting_invoice_number": 1
+}

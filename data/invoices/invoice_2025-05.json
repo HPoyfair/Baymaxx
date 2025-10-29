@@ -1,0 +1,14 @@
+{
+  "type": "monthly",
+  "period": {
+    "year": 2025,
+    "month": 5
+  },
+  "line_items": [
+    {
+      "description": "EX 15593142054 HP MESSAGEING EXAMPLE \u2013 SMS",
+      "qty": 727,
+      "unit_price": 0.0125
+    }
+  ]
+}

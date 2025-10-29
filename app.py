@@ -1,12 +1,150 @@
-# app.py
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+# Standard library
 from pathlib import Path
-from PIL import Image, ImageTk
+from datetime import datetime
+import os
+import sys
 import csv
 
+# Tkinter
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+# Optional PIL (logo)
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = None
+    ImageTk = None
+
+# Local modules
 import view_clients as clients
+
+
+# --- Baymaxx: ensure we import the local invoicing.py, not a different site-package ---
+import sys as _sys_local, os as _os_local, importlib as _importlib_local
+_HERE = _os_local.path.dirname(__file__)
+if _HERE not in _sys_local.path:
+    _sys_local.path.insert(0, _HERE)
+
 import invoicing as inv
+_importlib_local.reload(inv)  # ensure latest file is used
+
+
+CELL_MAP = {
+    "start_row": 13,
+    "desc_col": "A",
+    "qty_col":  "F",   # push right
+    "unit_col": "G",   # push right
+    "amount_col": "H", # push right
+    "subtotal_cell": "H16",
+    "total_cell":    "H18",
+    "date_cell":     "H7",  # DATE
+    "terms_cell":    "H8",  # TERMS
+    "invoice_no_cell":"G5",
+    "billto_cell":   "A8",
+}
+
+
+# --- Fallback shim: if invoicing.finalize_with_template is missing, use classic pipeline ---
+if not hasattr(inv, "finalize_with_template"):
+    def _finalize_shim(inv_obj, template_path):
+        internal = inv.save_invoice(inv_obj)
+        try:
+            csv_path = inv.export_invoice_csv(inv_obj)
+        except Exception:
+            csv_path = None
+        pdf_path = None
+        # Try Excel template -> PDF (Windows with Excel)
+        if template_path and os.name == "nt":
+            try:
+                pdf_path = inv.export_invoice_pdf_via_template(inv_obj, template_path)
+            except Exception:
+                pdf_path = None
+        if not pdf_path:
+            try:
+                pdf_path = inv.export_invoice_pdf(inv_obj)
+            except Exception:
+                pdf_path = None
+        return {"json": str(internal), "csv": str(csv_path) if csv_path else None,
+                "xlsm": None, "pdf": str(pdf_path) if pdf_path else None}
+
+    inv.finalize_with_template = _finalize_shim  # patches module at runtime
+
+
+# ---- Finalize shim: uses invoicing.finalize_with_template if present,
+# ---- else reconstructs the same pipeline with existing functions.
+def _finalize_shim(inv_module, inv_obj, template_path):
+    fn = getattr(inv_module, "finalize_with_template", None)
+    if fn:
+        return fn(inv_obj, template_path)
+
+    json_path = inv_module.save_invoice(inv_obj)
+    try:
+        csv_path = inv_module.export_invoice_csv(inv_obj)
+    except Exception:
+        csv_path = None
+
+    xlsm_path = None
+    pdf_path = None
+    try:
+        pdf_path = inv_module.export_invoice_pdf_via_template(
+            inv_obj, template_path
+        )
+        try:
+            out_dir = inv_module.invoice_output_dir()
+        except Exception:
+            from pathlib import Path as _P
+            out_dir = _P(__file__).resolve().parent / "data" / "invoices"
+        cand = out_dir / (inv_module.invoice_filename(inv_obj, "xlsm").replace(".xlsm","") + ".xlsm")
+        if cand.exists():
+            xlsm_path = cand
+    except Exception:
+        pass
+
+    if not pdf_path:
+        try:
+            pdf_path = inv_module.export_invoice_pdf(inv_obj, template_path=template_path)
+        except Exception:
+            pdf_path = None
+
+    return {"json": json_path, "csv": csv_path, "xlsm": xlsm_path, "pdf": pdf_path}
+
+# --- Find the parent org (top-level client) from clients.json based on the sites in the invoice
+def _infer_parent_from_clients(inv_obj, clients_path):
+    import json, re
+    try:
+        with open(clients_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    # Collect site names from line-item descriptions (before the "—")
+    def _norm(s):
+        s = (s or "").upper().strip()
+        s = s.replace("—", "-").replace("–", "-")
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    site_names = []
+    for li in inv_obj.get("line_items", []):
+        desc = (li.get("description") or "")
+        left = desc.split("—", 1)[0].strip()
+        u = _norm(left)
+        # drop suffixes like " VOICE", " SMS"
+        for suf in (" VOICE", " SMS", "- VOICE", "- SMS"):
+            if u.endswith(suf):
+                u = u[: -len(suf)].strip()
+        site_names.append(u)
+
+    # Look up which top-level client contains any of these sites
+    for c in (data.get("clients") or []):
+        for d in (c.get("divisions") or []):
+            for s in (d.get("sites") or []):
+                sn = _norm(s.get("name"))
+                for target in site_names:
+                    if sn == target or sn.startswith(target) or target in sn:
+                        return c.get("name")
+    return None
 
 
 class App(tk.Tk):
@@ -44,48 +182,46 @@ class App(tk.Tk):
         self.content.columnconfigure(0, weight=1)
 
         logo_path = Path(__file__).resolve().parent / "baymaxx.png"
-        try:
-            self.logo_img = self.load_logo(logo_path, max_w=420, max_h=420)
-            ttk.Label(self.content, image=self.logo_img).grid(row=0, column=0)
-        except Exception:
-            ttk.Label(self.content, text="Baymaxx", font=("", 28, "bold")).grid(row=0, column=0)
+        self.show_logo(logo_path)
+
+        # Ensure an invoice root exists / is remembered
         self.after(0, lambda: inv.ensure_invoice_root(self))
 
-    def load_logo(self, path: Path, max_w: int, max_h: int):
-        img = Image.open(path)
-        img.thumbnail((max_w, max_h), Image.LANCZOS)
-        return ImageTk.PhotoImage(img)
+    # ---------- Content swaps ----------
+    def show_logo(self, logo_path: Path):
+        for child in self.content.winfo_children():
+            child.destroy()
+        try:
+            if Image and ImageTk and logo_path.exists():
+                img = Image.open(logo_path)
+                img.thumbnail((420, 420))
+                self.logo_img = ImageTk.PhotoImage(img)
+                ttk.Label(self.content, image=self.logo_img).grid(row=0, column=0)
+            else:
+                ttk.Label(self.content, text="Baymaxx", font=("", 28, "bold")).grid(row=0, column=0)
+        except Exception:
+            ttk.Label(self.content, text="Baymaxx", font=("", 28, "bold")).grid(row=0, column=0)
 
     def open_clients_manager(self):
         ClientsManager(self)
 
     def show_home(self) -> None:
-        for child in self.content.winfo_children():
-            child.destroy()
-        logo_path = Path(__file__).resolve().parent / "baymaxx.png"
-        try:
-            self.logo_img = self.load_logo(logo_path, max_w=420, max_h=420)
-            ttk.Label(self.content, image=self.logo_img).grid(row=0, column=0)
-        except Exception:
-            ttk.Label(self.content, text="Baymaxx", font=("", 28, "bold")).grid(row=0, column=0)
+        self.show_logo(Path(__file__).resolve().parent / "baymaxx.png")
 
     def show_monthly_import(self) -> None:
-        # clear -> create -> grid (so we don't destroy the new view)
         for child in self.content.winfo_children():
             child.destroy()
         view = MonthlyImportView(self.content, on_back=self.show_home)
-        view.grid(row=0, column=0)
+        view.grid(row=0, column=0, sticky="nsew")
 
     def show_invoices(self) -> None:
-        # clear -> create -> grid
         for child in self.content.winfo_children():
             child.destroy()
         view = ViewInvoicesView(self.content, on_back=self.show_home)
-        view.grid(row=0, column=0)
+        view.grid(row=0, column=0, sticky="nsew")
 
 
 # ---------------- Clients Manager ----------------
-
 class ClientsManager(tk.Toplevel):
     def __init__(self, parent: tk.Tk):
         super().__init__(parent)
@@ -219,7 +355,6 @@ class ClientsManager(tk.Toplevel):
 
 
 # ---------------- Divisions Manager (middle) ----------------
-
 class DivisionsManager(tk.Toplevel):
     def __init__(self, parent: tk.Toplevel, client_id: str, client_name: str):
         super().__init__(parent)
@@ -234,7 +369,7 @@ class DivisionsManager(tk.Toplevel):
         cols = ("name", "sites")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
         self.tree.heading("name", text="Name")
-        shead = self.tree.heading("sites", text="# Sites")
+        self.tree.heading("sites", text="# Sites")
         self.tree.column("name", width=360, anchor="w")
         self.tree.column("sites", width=100, anchor="center")
         self.tree.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 6))
@@ -245,7 +380,7 @@ class DivisionsManager(tk.Toplevel):
 
         btns = ttk.Frame(self, padding=(12, 6))
         btns.grid(row=1, column=0, columnspan=2, sticky="ew")
-        for i in range(5):
+        for i in range(5): 
             btns.columnconfigure(i, weight=1)
 
         ttk.Button(btns, text="Add", command=self.add_division).grid(row=0, column=0, sticky="ew", padx=4)
@@ -363,7 +498,6 @@ class DivisionsManager(tk.Toplevel):
 
 
 # ---------------- Sites Manager (bottom – has phone) ----------------
-
 class SitesManager(tk.Toplevel):
     def __init__(self, parent: tk.Toplevel, client_id: str, division_id: str, division_name: str):
         super().__init__(parent)
@@ -503,14 +637,8 @@ class SitesManager(tk.Toplevel):
 
 
 # ---------------- Right-pane views ----------------
-
 class MonthlyImportView(ttk.Frame):
-    """
-    Right-pane view for importing CSVs for a monthly invoice.
-    Lets the user add/remove CSV files and shows detected type + phone + match.
-    Double-click a row to preview the CSV.
-    Adds a month/year bar and colors rows by month/year validity.
-    """
+    
     def __init__(self, parent: tk.Widget, on_back):
         super().__init__(parent, padding=12)
         self.on_back = on_back
@@ -523,24 +651,40 @@ class MonthlyImportView(ttk.Frame):
         ttk.Label(hdr, text="New Monthly Invoice", font=("", 14, "bold")).pack(side="left")
         ttk.Button(hdr, text="Back", command=self.on_back).pack(side="right")
 
-        # --- month/year bar ---
-        bar = ttk.Frame(self)
-        bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        bar.columnconfigure(5, weight=1)
+        # --- controls row: month/year (left) + starting invoice (right) ---
+        controls = ttk.Frame(self)
+        controls.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        controls.columnconfigure(0, weight=1)   # left zone grows
+        controls.columnconfigure(1, weight=0)   # right zone hugs content
 
-        # month dropdown
-        self.month_var = tk.StringVar(value="10")  # default: October (adjust if you like)
-        self.year_var = tk.StringVar(value=str(Path().stat().st_mtime_ns // 10**9 and __import__("datetime").datetime.now().year))
+        # left: month/year + Apply
+        left = ttk.Frame(controls)
+        left.grid(row=0, column=0, sticky="w")
+        self.month_var = tk.StringVar(value=str(datetime.now().month))
+        self.year_var  = tk.StringVar(value=str(datetime.now().year))
 
-        ttk.Label(bar, text="Month (1–12):").grid(row=0, column=0, padx=(0, 6))
-        self.month_entry = ttk.Entry(bar, textvariable=self.month_var, width=5)
-        self.month_entry.grid(row=0, column=1)
+        ttk.Label(left, text="Month (1–12):").pack(side="left", padx=(0, 6))
+        self.month_entry = ttk.Entry(left, textvariable=self.month_var, width=4)
+        self.month_entry.pack(side="left")
 
-        ttk.Label(bar, text="Year:").grid(row=0, column=2, padx=(12, 6))
-        self.year_entry = ttk.Entry(bar, textvariable=self.year_var, width=6)
-        self.year_entry.grid(row=0, column=3)
+        ttk.Label(left, text="Year:").pack(side="left", padx=(12, 6))
+        self.year_entry = ttk.Entry(left, textvariable=self.year_var, width=6)
+        self.year_entry.pack(side="left")
 
-        ttk.Button(bar, text="Apply", command=self._revalidate_all).grid(row=0, column=4, padx=(12, 0))
+        ttk.Button(left, text="Apply", command=self._apply_month_year).pack(side="left", padx=(12, 0))
+
+        # right: starting invoice number
+        right = ttk.Frame(controls)
+        right.grid(row=0, column=1, sticky="e")
+        ttk.Label(right, text="Starting invoice #:").pack(side="left", padx=(0, 6))
+        self.start_num_var = tk.StringVar()
+        try:
+            preset = inv.get_starting_invoice_number()
+            if preset is not None:
+                self.start_num_var.set(str(preset))
+        except Exception:
+            pass
+        ttk.Entry(right, textvariable=self.start_num_var, width=10).pack(side="left")
 
         # Table of selected files
         cols = ("file", "type", "phone", "match")
@@ -569,8 +713,9 @@ class MonthlyImportView(ttk.Frame):
         ttk.Button(btns, text="Add CSV Files…", command=self.add_files).grid(row=0, column=0, sticky="ew", padx=4)
         ttk.Button(btns, text="Remove Selected", command=self.remove_selected).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(btns, text="Clear All", command=self.clear_all).grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(btns, text="Continue", command=self.on_continue).grid(row=0, column=3, sticky="ew", padx=4)
 
-        # also revalidate when month/year edits lose focus or hit Return
+        # revalidate when month/year edits lose focus or hit Return
         self.month_entry.bind("<FocusOut>", lambda e: self._revalidate_all())
         self.year_entry.bind("<FocusOut>",  lambda e: self._revalidate_all())
         self.month_entry.bind("<Return>",   lambda e: self._revalidate_all())
@@ -595,8 +740,7 @@ class MonthlyImportView(ttk.Frame):
                 match_str = self._format_match(match)
             except Exception as e:
                 kind, phone, match_str = "error", "", f"Error: {e}"
-
-            iid = self.tree.insert("", tk.END, values=(str(pth), kind, phone, match_str))
+            self.tree.insert("", tk.END, values=(str(pth), kind, phone, match_str))
         # validate after adding
         self._revalidate_all()
 
@@ -604,6 +748,7 @@ class MonthlyImportView(ttk.Frame):
         if not isinstance(match, dict) or not match:
             return ""
         parts = [match.get("client_name", ""), match.get("division_name", ""), match.get("site_name", "")]
+        
         return " > ".join([p for p in parts if p])
 
     def remove_selected(self):
@@ -615,20 +760,7 @@ class MonthlyImportView(ttk.Frame):
             self.tree.delete(iid)
 
     # ---------- preview helpers ----------
-    def _on_preview(self, _event=None):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        iid = sel[0]
-        path = self.tree.set(iid, "file")  # full path in the 'file' column
-        if not path:
-            return
-        self._open_csv_preview(Path(path))
-
-
-
     def _open_csv_preview(self, path: Path, highlight_rows=None):
-        # Read up to ~500 rows (preview only)
         headers, rows = [], []
         try:
             with path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -658,13 +790,6 @@ class MonthlyImportView(ttk.Frame):
         hbar.grid(row=1, column=0, sticky="ew")
         tree.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
 
-        # Configure row highlight tags
-        try:
-            tree.tag_configure("bad", background="#ffe5e5")   # light red
-            tree.tag_configure("good", background="#e8ffe8")  # light green (optional)
-        except Exception:
-            pass
-
         # Columns
         num_cols = max(len(headers), max((len(r) for r in rows), default=0))
         col_ids = [f"c{i}" for i in range(num_cols)]
@@ -674,44 +799,52 @@ class MonthlyImportView(ttk.Frame):
             tree.heading(cid, text=head)
             tree.column(cid, width=140, stretch=True, anchor="w")
 
-        # Compute set of "bad" preview-row indices from file rows
+        # Highlight out-of-range rows if provided
         bad_preview_idx: set[int] = set()
         if highlight_rows:
-            # highlight_rows contains 1-based CSV lines, header=1, first data row=2
-            # our preview rows are 0-based for the first data row (line 2)
             for file_row_num, _cell in highlight_rows:
-                idx = file_row_num - 2
+                idx = file_row_num - 2  # header is line 1
                 if 0 <= idx < len(rows):
                     bad_preview_idx.add(idx)
 
-        # Insert rows with tags
         for i, r in enumerate(rows):
             values = r + [""] * (num_cols - len(r))
-            tags = ()
-            if bad_preview_idx:
-                tags = ("bad",) if i in bad_preview_idx else ()
+            tags = ("bad",) if i in bad_preview_idx else ()
             tree.insert("", tk.END, values=values, tags=tags)
 
-        # Footer
+        try:
+            tree.tag_configure("bad", background="#ffe5e5")
+        except Exception:
+            pass
+
         footer = ttk.Frame(dlg, padding=(8, 6))
         footer.grid(row=2, column=0, columnspan=2, sticky="ew")
         footer.columnconfigure(0, weight=1)
-
-        # Summary line if we know how many are bad
         if bad_preview_idx:
-            ttk.Label(
-                footer,
-                text=f"Rows shown: {len(rows)} (max 500) — Out-of-range rows: {len(bad_preview_idx)}",
-            ).grid(row=0, column=0, sticky="w")
+            ttk.Label(footer, text=f"Rows shown: {len(rows)} (max 500) — Out-of-range rows: {len(bad_preview_idx)}").grid(row=0, column=0, sticky="w")
         else:
             ttk.Label(footer, text=f"Rows shown: {len(rows)} (max 500)").grid(row=0, column=0, sticky="w")
-
         ttk.Button(footer, text="Close", command=dlg.destroy).grid(row=0, column=1, sticky="e")
 
+    def _on_preview(self, _event=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        path = Path(self.tree.set(iid, "file"))
+        kind = (self.tree.set(iid, "type") or "").strip().lower()
 
+        # If month/year are provided, compute the out-of-range rows
+        highlight_rows = None
+        try:
+            y = int(getattr(self, "year_var", tk.StringVar(value="")).get() or 0)
+            m = int(getattr(self, "month_var", tk.StringVar(value="")).get() or 0)
+            if y and m and kind in {"messages", "calls"}:
+                highlight_rows = inv.find_out_of_month_rows(path, kind, y, m)
+        except Exception:
+            highlight_rows = None
 
-
-
+        self._open_csv_preview(path, highlight_rows=highlight_rows)
 
     # ---------- month/year validation ----------
     def _get_year_month(self) -> tuple[int | None, int | None]:
@@ -739,26 +872,175 @@ class MonthlyImportView(ttk.Frame):
         ok, _stats = inv.check_csv_month_year(path, kind, y, m)
         self.tree.item(iid, tags=("ok",) if ok else ("bad",))
 
-    def _on_preview(self, _event=None):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        iid = sel[0]
-        path = Path(self.tree.set(iid, "file"))
-        kind = (self.tree.set(iid, "type") or "").strip().lower()
-
-        # If month/year are provided, compute the out-of-range rows
-        highlight_rows = None
+    def _apply_month_year(self):
+        # Validate month & year
         try:
-            y = int(getattr(self, "year_var", tk.StringVar(value="")).get() or 0)
-            m = int(getattr(self, "month_var", tk.StringVar(value="")).get() or 0)
-            if y and m and kind in {"messages", "calls"}:
-                highlight_rows = inv.find_out_of_month_rows(path, kind, y, m)
+            month = int(self.month_var.get())
+            year = int(self.year_var.get())
+            if not (1 <= month <= 12):
+                raise ValueError
         except Exception:
-            highlight_rows = None
+            messagebox.showinfo("Month/Year", "Enter a valid month (1–12) and year (e.g., 2025)." )
+            return
 
-        self._open_csv_preview(path, highlight_rows=highlight_rows)
+        # Read & persist starting invoice number (optional)
+        raw = (self.start_num_var.get() or "").strip()
+        if raw:
+            try:
+                start_no = int(raw)
+                if start_no < 0:
+                    raise ValueError
+                inv.set_starting_invoice_number(start_no)
+            except Exception:
+                messagebox.showinfo("Starting invoice #", "Please enter a non-negative whole number.")
+                return
 
+        # Re-check each file for the selected month/year and recolor rows
+        self._revalidate_all()
+
+    # ---------- Continue: build & export invoice ----------
+    def _site_from_match(self, text: str) -> str | None:
+        parts = [p.strip() for p in (text or "").split(">") if p.strip()]
+        return parts[-1] if parts else None
+
+    def on_continue(self):
+        """
+        Verify CSVs for the selected month/year, build invoice,
+        add Voice line items (qty = row count, $0.14 each) and Message line items likewise,
+        then run a single finalize_with_template() that:
+        - saves JSON (internal)
+        - exports CSV (user folder)
+        - fills Excel template (.xlsm) and exports PDF on Windows (Excel + pywin32)
+        - falls back to ReportLab PDF elsewhere.
+        Also decorates each line-item description with (-LAST4) from the match column,
+        and sets BILL TO to the parent organization (name + address) from clients.json.
+        """
+        y, m = self._get_year_month()
+        if not y or not m:
+            messagebox.showerror("Month/Year required", "Enter Month and Year, then click Apply.")
+            return
+
+        bad = []
+        calls_with_sites = []
+        messages_with_sites = []
+        for iid in self.tree.get_children():
+            tags = set(self.tree.item(iid, "tags") or ())
+            path = Path(self.tree.set(iid, "file"))
+            kind = (self.tree.set(iid, "type") or "").strip().lower()
+            match_text = self.tree.set(iid, "match") or ""
+            site_name = self._site_from_match(match_text)
+
+            if "ok" not in tags:
+                bad.append(path.name)
+            elif kind == "calls":
+                calls_with_sites.append((str(path), site_name))
+            elif kind == "messages":
+                messages_with_sites.append((str(path), site_name))
+
+        if bad:
+            message = "Some files are not within the selected month/year:\n\n" + "\n".join(f"- {n}" for n in bad)
+            messagebox.showerror("Validation failed", message)
+            return
+
+        # Build invoice
+        inv_obj = inv.new_monthly_invoice(y, m)
+
+        # Starting invoice number (optional)
+        start_txt = (self.start_num_var.get() or "").strip()
+        if start_txt.isdigit():
+            inv_obj["starting_invoice_number"] = int(start_txt)
+            try:
+                inv.set_starting_invoice_number(int(start_txt))
+            except Exception:
+                pass
+
+        # Add voice and message line items
+        if calls_with_sites:
+            inv.add_voice_items_to_invoice(inv_obj, calls_with_sites, y, m, inv.UNIT_PRICE_VOICE)
+        if messages_with_sites:
+            inv.add_message_items_to_invoice(inv_obj, messages_with_sites, y, m, inv.UNIT_PRICE_SMS)
+
+        # Decorate descriptions with phone last4 from match column
+        import re as _re, json
+        site_phones = {}
+        for iid in self.tree.get_children():
+            match_text = self.tree.set(iid, "match") or ""
+            site_name = self._site_from_match(match_text)
+            if not site_name:
+                continue
+            m_last4 = _re.search(r"\((?:-|–)?(\d{4})\)", match_text)  # matches '(-1234)' or '(–1234)'
+            if m_last4:
+                site_phones[site_name] = m_last4.group(1)
+        if site_phones:
+            inv_obj["site_phones"] = site_phones
+
+        # Infer top-level parent org for BILL TO from clients.json
+        def _norm_name(s: str) -> str:
+            s = (s or "").upper().strip()
+            s = s.replace("—", "-").replace("–", "-")
+            s = _re.sub(r"\s+", " ", s)
+            for suf in (" VOICE", " SMS", "- VOICE", "- SMS"):
+                if s.endswith(suf):
+                    s = s[: -len(suf)].strip()
+            return s
+
+        here = Path(__file__).resolve().parent
+        clients_path = here / "data" / "clients.json"
+        parent_name = None
+        try:
+            data = json.loads(clients_path.read_text(encoding="utf-8"))
+            target_sites = {_norm_name(s) for _, s in (calls_with_sites + messages_with_sites) if s}
+            for c in (data.get("clients") or []):
+                found = False
+                for d in (c.get("divisions") or []):
+                    for s in (d.get("sites") or []):
+                        sn = _norm_name(s.get("name", ""))
+                        if any(sn == t or sn.startswith(t) or t in sn for t in target_sites):
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    parent_name = c.get("name")
+                    break
+        except Exception:
+            parent_name = None
+
+        if parent_name:
+            inv_obj["client_name_snapshot"] = parent_name  # invoicing.py will fill name+address under BILL TO
+
+        # Locate invoice template next to app.py
+        template_candidates = [here / "invoice.xlsm", here / "Invoice Template HP.xlsm"]
+        template_path = None
+        for cand in template_candidates:
+            if cand.exists():
+                template_path = cand
+                break
+        if not template_path:
+            messagebox.showwarning(
+                "Template not found",
+                "Couldn't find 'invoice.xlsm' or 'Invoice Template HP.xlsm' next to app.py.\n"
+                "I'll still generate a PDF with the fallback layout."
+            )
+            template_path = here / "invoice.xlsm"  # finalize() will still run; Excel export will fallback
+
+        # Run one-step pipeline to generate outputs
+        try:
+            paths = inv.finalize_with_template(inv_obj, str(template_path))
+
+        except Exception as e:
+            messagebox.showerror("Invoice error", f"Failed to create invoice:\n{e}")
+            return
+
+        # Notify success
+        parts = []
+        if paths.get("json"): parts.append(f"Saved JSON: {paths['json']}")
+        if paths.get("csv"):  parts.append(f"Exported CSV: {paths['csv']}")
+        if paths.get("xlsm"): parts.append(f"Filled Excel: {paths['xlsm']}")
+        if paths.get("pdf"):  parts.append(f"Exported PDF: {paths['pdf']}")
+        if not parts:
+            parts = ["No files were produced."]
+        messagebox.showinfo("Invoice created", "\n".join(parts))
 
 
 
@@ -817,6 +1099,160 @@ class ViewInvoicesView(ttk.Frame):
             client = item.get("client_name", "") or item.get("client_id", "")
             total = item.get("total", 0.0)
             self.tree.insert("", tk.END, values=(pid, ptype, ptxt, client, f"{total:,.2f}"))
+# ---------------- Helpers for invoice edits & finalize ----------------
+
+def _load_clients_doc(path):
+    """Load data/clients.json -> dict (return {} if missing/bad)."""
+    try:
+        import json
+        from pathlib import Path
+        p = Path(path)
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _normalize_site_key(s: str) -> str:
+    """Uppercase, strip, remove VOICE/SMS suffix and any trailing ' - ' junk."""
+    import re
+    u = (s or "").upper().strip()
+    u = u.replace("—", "-")
+    for suf in (" VOICE", " SMS"):
+        if u.endswith(suf):
+            u = u[:-len(suf)].strip()
+    # If there is an en dash/ hyphen separating base name, prefer left side
+    if " - " in u:
+        u = u.split(" - ", 1)[0].strip()
+    if "–" in u:
+        u = u.split("–", 1)[0].strip()
+    # collapse internal whitespace
+    u = re.sub(r"\s+", " ", u)
+    return u
+
+def _decorate_descriptions_with_last4(inv_obj: dict, site_phones: dict) -> None:
+    """
+    Append ' (-LAST4)' to each description when we have a phone match.
+    We DON'T remove VOICE/SMS text from names; we only add the suffix.
+    """
+    import re
+    phones = {(_normalize_site_key(k)): v for k, v in (site_phones or {}).items()}
+    for li in inv_obj.get("line_items", []) or []:
+        desc = (li.get("description") or "").strip()
+        if not desc:
+            continue
+        # Skip if already has (-####)
+        if re.search(r"\(\-\d{4}\)\s*$", desc):
+            continue
+        base_key = _normalize_site_key(desc)
+        last4 = phones.get(base_key)
+        if not last4 and "–" in desc:
+            base_key = _normalize_site_key(desc.split("–", 1)[0])
+            last4 = phones.get(base_key)
+        if last4 and len(str(last4)) == 4 and str(last4).isdigit():
+            li["description"] = f"{desc} (-{last4})"
+
+def _infer_parent_billto_from_clients(inv_obj: dict, clients_doc: dict) -> None:
+    """
+    Look up the parent organization for any site in line_items and set inv_obj['client']
+    to {'name': PARENT_NAME, 'address': ADDRESS, 'contact': optional}.
+    Uses the first matched parent found among the invoice's sites.
+    """
+    if not clients_doc:
+        return
+
+    # Build a quick map: site_name_norm -> (parent_name, parent_address, parent_contact)
+    mapping = {}  # normalized site -> (parent, address, contact)
+    for c in clients_doc.get("clients", []) or []:
+        parent_name = (c.get("name") or "").strip()
+        parent_addr = (c.get("address") or "").strip()
+        parent_contact = (c.get("contact") or "").strip()
+        for div in c.get("divisions", []) or []:
+            for s in div.get("sites", []) or []:
+                site_nm = _normalize_site_key(s.get("name") or "")
+                if site_nm:
+                    mapping[site_nm] = (parent_name, parent_addr, parent_contact)
+
+    # Scan the invoice line items until we find a site that maps to a parent
+    client = inv_obj.setdefault("client", {})
+    for li in inv_obj.get("line_items", []) or []:
+        desc = (li.get("description") or "").strip()
+        if not desc:
+            continue
+        key = _normalize_site_key(desc)
+        hit = mapping.get(key)
+        if not hit and "–" in desc:
+            key = _normalize_site_key(desc.split("–", 1)[0])
+            hit = mapping.get(key)
+        if hit:
+            client["name"], client["address"], client["contact"] = hit
+            break
+
+def _finalize_shim(inv_obj: dict, template_path: str) -> dict:
+    """
+    Save JSON, export CSV, then try to fill Excel template (and PDF if Windows+Excel),
+    else fall back to ReportLab PDF. Returns paths dict with any of: json,csv,xlsm,xlsx,pdf.
+    """
+    paths = {}
+    # 1) JSON (internal)
+    try:
+        p = inv.save_invoice(inv_obj)
+        paths["json"] = str(p)
+    except Exception:
+        pass
+
+    # 2) CSV
+    try:
+        p = inv.export_invoice_csv(inv_obj)
+        paths["csv"] = str(p)
+    except Exception:
+        pass
+
+    # 3) Excel template (+ PDF on Windows via pywin32) – support v3 or legacy name
+    try:
+        if hasattr(inv, "export_invoice_with_excel_template_v3"):
+            out = inv.export_invoice_with_excel_template_v3(
+                inv_obj,
+                template_path=str(template_path),
+                out_dir=None,
+                export_pdf=True
+            )
+            # out may be a dict or tuple; normalize:
+            if isinstance(out, dict):
+                paths.update({k: str(v) for k, v in out.items() if v})
+            else:
+                # (xlsm_path, pdf_path) style
+                if len(out) >= 1 and out[0]: paths["xlsm"] = str(out[0])
+                if len(out) >= 2 and out[1]: paths["pdf"]  = str(out[1])
+        elif hasattr(inv, "export_invoice_with_excel_template"):
+            out = inv.export_invoice_with_excel_template(
+                inv_obj,
+                str(template_path)
+            )
+            if isinstance(out, dict):
+                paths.update({k: str(v) for k, v in out.items() if v})
+            else:
+                if len(out) >= 1 and out[0]: paths["xlsm"] = str(out[0])
+                if len(out) >= 2 and out[1]: paths["pdf"]  = str(out[1])
+        elif hasattr(inv, "export_invoice_pdf_via_template"):
+            # Some versions only return a PDF via template
+            p = inv.export_invoice_pdf_via_template(inv_obj, str(template_path))
+            if p:
+                paths["pdf"] = str(p)
+    except Exception:
+        # Fall through to ReportLab PDF
+        pass
+
+    # 4) Fallback PDF (simple layout)
+    if "pdf" not in paths:
+        try:
+            p = inv.export_invoice_pdf(inv_obj)
+            if p:
+                paths["pdf"] = str(p)
+        except Exception:
+            pass
+
+    return paths
 
 
 def main():

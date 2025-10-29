@@ -1,0 +1,33 @@
+{
+  "id": "8b9deab0-3c76-4c9c-ac61-d129156bb365",
+  "type": "monthly",
+  "period": {
+    "year": 2025,
+    "month": 5
+  },
+  "client_id": null,
+  "client_name_snapshot": null,
+  "created_at": null,
+  "tax_rate": 0.0,
+  "line_items": [
+    {
+      "description": "CCHLS Voice (-9990)",
+      "qty": 336.0,
+      "unit_price": 0.14,
+      "amount": 47.04
+    }
+  ],
+  "totals": {
+    "subtotal": 47.04,
+    "tax": 0.0,
+    "total": 47.04
+  },
+  "notes": "",
+  "client": {
+    "name": "Sante Foundation Medical Group (\"SFMG\")",
+    "address": "7370 N Palm Ave STE 101\nFresno, CA 93711",
+    "contact": "billing@client.com"
+  },
+  "invoice_number": "24",
+  "date": "9/16/2025"
+}

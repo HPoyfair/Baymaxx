@@ -37,6 +37,251 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+# ---------- required core helpers (paste into invoicing.py) ----------
+
+def _ensure_line_items(inv: dict) -> list:
+    """Make sure inv['line_items'] exists and is a list; return it."""
+    if not isinstance(inv.get("line_items"), list):
+        inv["line_items"] = []
+    return inv["line_items"]
+
+def recompute_totals(inv: dict) -> None:
+    """Recalculate invoice total from line items (qty * unit_price)."""
+    total = 0.0
+    for li in inv.get("line_items", []):
+        # ensure each line has an amount
+        qty = float(li.get("qty", 0) or 0)
+        price = float(li.get("unit_price", 0) or 0)
+        amt = round(qty * price, 2)
+        li["amount"] = amt
+        total += amt
+    inv["total"] = round(total, 2)
+
+def add_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
+    """
+    Append a line item and keep totals in sync.
+    Called by add_voice_items_to_invoice / add_message_items_to_invoice.
+    """
+    items = _ensure_line_items(inv)
+    qty = float(qty or 0)
+    unit_price = float(unit_price or 0.0)
+    amount = round(qty * unit_price, 2)
+
+    items.append({
+        "description": description or "",
+        "qty": qty,
+        "unit_price": unit_price,
+        "amount": amount,
+    })
+    _recompute_totals(inv)
+
+# (optional) public alias if any other code prefers this name
+def add_line_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
+    _add_item(inv, description, qty, unit_price)
+# --------------------------------------------------------------------
+
+
+# ==== BEGIN: minimal line-item + totals shims (define only if missing) ====
+
+# Public helper (create if missing)
+if 'add_line_item' not in globals():
+    def add_line_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
+        """
+        Append a line item to inv['line_items'] and keep amount/total in sync.
+        """
+        qty = float(qty or 0)
+        unit_price = float(unit_price or 0.0)
+        amount = round(qty * unit_price, 2)
+
+        li = {
+            "description": description or "",
+            "qty": qty,
+            "unit_price": unit_price,
+            "amount": amount,
+        }
+        inv.setdefault("line_items", []).append(li)
+        # keep totals in sync
+        if '_recompute_totals' in globals():
+            _recompute_totals(inv)
+        elif 'recompute_totals' in globals():
+            recompute_totals(inv)
+        else:
+            # minimal inline total calc
+            subtotal = round(sum(float(x.get("amount", 0) or 0) for x in inv.get("line_items", [])), 2)
+            inv["total"] = subtotal
+
+# Private alias expected by app.py or newer helpers
+if '_add_item' not in globals():
+    def _add_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
+        add_line_item(inv, description, qty, unit_price)
+
+# Totals shim if project uses different name
+if '_recompute_totals' not in globals():
+    if 'recompute_totals' in globals():
+        def _recompute_totals(inv: dict) -> None:
+            recompute_totals(inv)
+    else:
+        def _recompute_totals(inv: dict) -> None:
+            subtotal = round(sum(float(x.get("amount", 0) or 0) for x in inv.get("line_items", [])), 2)
+            inv["total"] = subtotal
+
+# ==== END: minimal line-item + totals shims ====
+
+
+
+# ================== BEGIN: messages support & compat helpers ==================
+
+# price fallback if not already defined elsewhere
+try:
+    UNIT_PRICE_SMS
+except NameError:
+    UNIT_PRICE_SMS = 0.07
+
+# compat aliases if your project uses non-underscored names
+if '_add_item' not in globals() and 'add_item' in globals():
+    def _add_item(*a, **k): return add_item(*a, **k)
+if '_recompute_totals' not in globals() and 'recompute_totals' in globals():
+    def _recompute_totals(*a, **k): return recompute_totals(*a, **k)
+
+# ---------------- phone resolution (re-usable) ----------------
+def _normalize_site_key(s: str) -> str:
+    u = (s or '').upper().strip()
+    for suf in (' VOICE', ' SMS'):
+        if u.endswith(suf):
+            u = u[:-len(suf)].strip()
+    if '–' in u:
+        u = u.split('–', 1)[0].strip()
+    u = ' '.join(u.split())
+    return u
+
+def _build_priority_phone_map(inv: dict) -> dict[str, str]:
+    phones: dict[str, str] = {}
+    # 1) UI-harvested matches
+    sp = inv.get('site_phones') or {}
+    if isinstance(sp, dict):
+        for name, last4 in sp.items():
+            last4 = str(last4 or '').strip()
+            if last4.isdigit() and len(last4) == 4:
+                phones[_normalize_site_key(name)] = last4
+
+    # 2) clients.json (optional)
+    load_clients = globals().get('_load_clients_doc') or globals().get('load_clients_doc')
+    if callable(load_clients):
+        try:
+            clients_doc = load_clients(inv.get('clients_path'))
+        except TypeError:
+            clients_doc = load_clients()
+        if isinstance(clients_doc, dict):
+            for c in (clients_doc.get('clients') or []):
+                for s in (c.get('sites') or []):
+                    nm = (s.get('name') or '').strip()
+                    ph = (s.get('phone') or '').strip()
+                    if nm and ph.isdigit() and len(ph) == 4:
+                        phones.setdefault(_normalize_site_key(nm), ph)
+    return phones
+
+def _lookup_last4(phones: dict[str, str], desc: str) -> str | None:
+    if not desc:
+        return None
+    return phones.get(_normalize_site_key(desc))
+
+
+
+
+# ---------------- CSV aggregation (month/year) ----------------
+def _extract_row_datetime(row: dict, kind: str):
+    """Try to parse a datetime from a CSV row for the given kind."""
+    from datetime import datetime
+    val = None
+    if kind == "calls":
+        for k in ("Start Time", "StartTime"):
+            v = row.get(k)
+            if v:
+                val = v.strip(); break
+    else:  # messages
+        for k in ("SentDate", "Date", "MessageDate", "SendDate"):
+            v = row.get(k)
+            if v:
+                val = v.strip(); break
+    if not val:
+        return None
+
+    # 1) ISO-ish
+    try:
+        return datetime.fromisoformat(val.replace('Z', '+00:00'))
+    except Exception:
+        pass
+
+    # 2) pattern like "13:00:53 PDT 2025-05-31" -> %H:%M:%S %Z %Y-%m-%d
+    #    Drop the TZ abbrev (PDT) if needed
+    try:
+        parts = val.split()
+        # if it looks like HH:MM:SS TZ YYYY-MM-DD
+        if len(parts) >= 4 and parts[0].count(':') == 2 and parts[-1].count('-') == 2:
+            no_tz = f"{parts[0]} {parts[-1]}"  # "13:00:53 2025-05-31"
+            return datetime.strptime(no_tz, "%H:%M:%S %Y-%m-%d")
+    except Exception:
+        pass
+
+    # 3) final fallback: take leading YYYY-MM-DD
+    try:
+        return datetime.strptime(val[:10], "%Y-%m-%d")
+    except Exception:
+        return None
+
+def _aggregate_rows_by_site(files_with_sites, kind: str, year: int, month: int) -> dict[str, int]:
+    """files_with_sites: List[Tuple[path, site_name_or_None]]"""
+    import csv
+    from collections import defaultdict
+    from pathlib import Path
+
+    counts = defaultdict(int)
+    for path, site_name in (files_with_sites or []):
+        site = site_name or Path(path).stem
+        try:
+            with open(path, newline='', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    dt = _extract_row_datetime(row, kind)
+                    if not dt:
+                        continue
+                    if dt.year == year and dt.month == month:
+                        counts[site] += 1
+        except Exception:
+            # ignore unreadable files
+            pass
+    return dict(counts)
+
+# ---------------- public API: messages ----------------
+def add_message_items_to_invoice(
+    inv: dict,
+    messages_with_sites: list[tuple[str, str | None]],
+    year: int,
+    month: int,
+    unit_price: float = UNIT_PRICE_SMS
+) -> None:
+    """
+    Aggregate message rows per site (within the selected month/year)
+    and append one line item per site:
+      - description: <Site Name> (-LAST4)  (when resolvable)
+      - qty: row count for that site
+      - unit_price: provided constant (e.g., 0.07)
+    """
+    counts = _aggregate_rows_by_site(messages_with_sites, "messages", year, month)
+    phones = _build_priority_phone_map(inv)
+
+    for site, qty in sorted(counts.items()):
+        desc = site or ""
+        last4 = _lookup_last4(phones, desc)
+        if last4:
+            desc = f"{desc} (-{last4})"
+        _add_item(inv, desc, qty, unit_price)
+
+    _recompute_totals(inv)
+
+# ================== END: messages support & compat helpers ==================
+
+
 def _recalc_totals(inv: Dict[str, Any]) -> None:
     """Recalculate amounts and totals in-place."""
     items: List[Dict[str, Any]] = inv.get("line_items", [])
@@ -557,6 +802,87 @@ def check_csv_month_year(path: str | Path, kind: str, year: int, month: int) -> 
         return (False, {"in": 0, "out": 0, "rows": 0})
 # ---------- month/year row finder for preview highlighting ----------
 
+
+# ------------------ compat shims (safe to add once) ------------------
+
+# If your file doesn't define UNIT_PRICE_SMS, default it here
+try:
+    UNIT_PRICE_SMS
+except NameError:
+    UNIT_PRICE_SMS = 0.07  # adjust if your SMS price is different
+
+# If your aggregator is exported without a leading underscore, alias it
+if '_aggregate_rows_by_site' not in globals() and 'aggregate_rows_by_site' in globals():
+    def _aggregate_rows_by_site(files_with_sites, kind, year, month):
+        return aggregate_rows_by_site(files_with_sites, kind, year, month)
+
+# If your add/recompute helpers are exported without underscores, alias them
+if '_add_item' not in globals() and 'add_item' in globals():
+    def _add_item(*a, **k):
+        return add_item(*a, **k)
+
+if '_recompute_totals' not in globals() and 'recompute_totals' in globals():
+    def _recompute_totals(*a, **k):
+        return recompute_totals(*a, **k)
+
+# ------------------ phone-resolution helpers ------------------
+
+def _normalize_site_key(s: str) -> str:
+    """Uppercase, trim VOICE/SMS suffix, and take left side of en dash."""
+    u = (s or '').upper().strip()
+    for suf in (' VOICE', ' SMS'):
+        if u.endswith(suf):
+            u = u[:-len(suf)].strip()
+    if '–' in u:
+        u = u.split('–', 1)[0].strip()
+    # collapse internal whitespace
+    u = ' '.join(u.split())
+    return u
+
+def _build_priority_phone_map(inv: dict) -> dict[str, str]:
+    """
+    Merge phones from inv['site_phones'] (UI-harvested) with clients.json,
+    returning NAME(normalized)->'last4'.
+    """
+    phones: dict[str, str] = {}
+
+    # 1) UI-provided site phones from the match column
+    sp = inv.get('site_phones') or {}
+    if isinstance(sp, dict):
+        for name, last4 in sp.items():
+            if last4 and str(last4).isdigit() and len(str(last4)) == 4:
+                phones[_normalize_site_key(name)] = str(last4)
+
+    # 2) Clients.json (if your loader exists)
+    load_clients = (globals().get('_load_clients_doc') or
+                    globals().get('load_clients_doc'))
+    clients_doc = None
+    if callable(load_clients):
+        try:
+            # Some codebases take an optional path arg; others take none
+            clients_doc = load_clients(inv.get('clients_path'))
+        except TypeError:
+            clients_doc = load_clients()
+    if isinstance(clients_doc, dict):
+        for c in (clients_doc.get('clients') or []):
+            for s in (c.get('sites') or []):
+                nm = (s.get('name') or '').strip()
+                ph = (s.get('phone') or '').strip()
+                if nm and ph.isdigit() and len(ph) == 4:
+                    phones.setdefault(_normalize_site_key(nm), ph)
+
+    return phones
+
+def _lookup_last4(phones: dict[str, str], desc: str) -> str | None:
+    """Resolve the 4-digit phone for a given line-item description."""
+    if not desc:
+        return None
+    key = _normalize_site_key(desc)
+    return phones.get(key)
+
+
+
+
 def _date_col_index(headers: list[str], kind: str) -> int | None:
     """Return index of the date column we should check for this kind."""
     norm = lambda s: re.sub(r"[\s_\-]+", "", s.strip().lower())
@@ -626,3 +952,521 @@ def find_out_of_month_rows(path: str | Path, kind: str, year: int, month: int) -
         except Exception:
             n = 0
         return [(i, "read-error") for i in range(2, max(2, n + 1))]
+# ---------- starting invoice number (persisted in settings) ----------
+
+def get_starting_invoice_number(default: int | None = None) -> int | None:
+    s = _load_settings()
+    val = s.get("starting_invoice_number", None)
+    if isinstance(val, int):
+        return val
+    # coerce if stored as string
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+def set_starting_invoice_number(n: int | None) -> None:
+    s = _load_settings()
+    if n is None:
+        # remove it if you want “blank”
+        s.pop("starting_invoice_number", None)
+    else:
+        s["starting_invoice_number"] = int(n)
+    _save_settings(s)
+
+# ---------- Voice invoice helpers (row-count × fixed unit price) ----------
+
+UNIT_PRICE_VOICE = 0.14  # USD per call (flat), per user spec
+
+def _normalize_headers(headers: list[str]) -> list[str]:
+    return [re.sub(r"[\s_\-]+", "", (h or "").strip().lower()) for h in headers]
+
+def count_rows_calls_csv(path: str | Path, filter_year: int | None = None, filter_month: int | None = None) -> int:
+    """
+    Count rows in a Twilio *calls* CSV. If filter_year/month provided,
+    only count rows whose date cell is within that (year, month).
+    """
+    p = Path(path)
+    with p.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        headers = next(reader, [])
+        if filter_year is None or filter_month is None:
+            # Fast path: count all data rows
+            return sum(1 for _ in reader)
+        # Filtered path: locate date column appropriate for 'calls'
+        ci = _date_col_index(headers, "calls")
+        if ci is None:
+            # If we can't find a date column, safest is count zero for filtered mode
+            return 0
+        n = 0
+        for row in reader:
+            cell = row[ci] if ci < len(row) else ""
+            y, m = _ym_from_cell(cell)
+            if y == filter_year and m == filter_month:
+                n += 1
+        return n
+
+def build_voice_line_item(site_name: str | None, qty: int, unit_price: float = UNIT_PRICE_VOICE) -> dict:
+    """
+    Build a single line item dict (not yet added to invoice).
+    Description style: '{Site Name} — Voice' if site provided, else 'Voice'.
+    """
+    desc = f"{site_name} — Voice" if site_name else "Voice"
+    return {
+        "description": desc,
+        "qty": float(qty),
+        "unit_price": float(unit_price),
+        # amount will be set when added via add_line_item (recalc)
+    }
+
+def aggregate_voice_items_from_csvs(files_with_sites: list[tuple[str | Path, str | None]],
+                                    year: int | None = None,
+                                    month: int | None = None) -> list[dict]:
+    """
+    Given a list of (csv_path, site_name) for *calls* CSVs, compute quantity per site
+    where quantity = number of rows (optionally filtered by year/month).
+    Returns a list of line-item dicts (description/qty/unit_price), ready for add_line_item().
+    """
+    # Accumulate by site
+    by_site: dict[str, int] = {}
+    for csv_path, site_name in files_with_sites:
+        qty = count_rows_calls_csv(csv_path, year, month) if (year and month) else count_rows_calls_csv(csv_path)
+        key = site_name or ""
+        by_site[key] = by_site.get(key, 0) + int(qty)
+
+    items: list[dict] = []
+    for site_key, qty in sorted(by_site.items(), key=lambda kv: (kv[0] or "",)):
+        items.append(build_voice_line_item(site_key or None, qty))
+    return items
+
+
+def _normalize_site_key(name: str) -> str:
+    import re as _re
+    if not name: return ""
+    u = (name or "").upper().strip()
+    u = u.replace("—", "-").replace("–", "-")
+    u = _re.sub(r"\s+", " ", u)
+    return u
+
+def _build_priority_phone_map(inv: dict) -> dict[str,str]:
+    phones: dict[str,str] = {}
+    for k, v in (inv.get("site_phones") or {}).items():
+        sv = str(v)
+        if sv.isdigit() and len(sv) == 4:
+            phones[_normalize_site_key(k)] = sv
+    try:
+        import json
+        here = Path(__file__).resolve().parent
+        cpath = here / "data" / "clients.json"
+        if cpath.exists():
+            data = json.loads(cpath.read_text(encoding="utf-8"))
+            for c in data.get("clients", []):
+                for d in (c.get("divisions") or []):
+                    for s in (d.get("sites") or []):
+                        n = (s.get("name") or "").strip()
+                        ph = (s.get("phone") or "").strip()
+                        if n and ph.isdigit() and len(ph) == 4:
+                            phones.setdefault(_normalize_site_key(n), ph)
+    except Exception:
+        pass
+    return phones
+
+def _lookup_last4(phones: dict[str,str], desc: str) -> str | None:
+    if not desc: return None
+    key = _normalize_site_key(desc)
+    # direct
+    if key in phones:
+        return phones[key]
+    # try trimming VOICE/SMS
+    for suf in (" VOICE"," SMS"):
+        if key.endswith(suf):
+            k = key[:-len(suf)].strip()
+            if k in phones:
+                return phones[k]
+            key = k
+            break
+    # left side of dash
+    if " - " in key:
+        k = key.split(" - ",1)[0].strip()
+        if k in phones:
+            return phones[k]
+    return None
+
+
+def _normalize_site_key(name: str) -> str:
+    import re as _re
+    if not name: return ""
+    u = (name or "").upper().strip()
+    u = u.replace("—", "-").replace("–", "-")
+    u = _re.sub(r"\s+", " ", u)
+    return u
+
+def _build_priority_phone_map(inv: dict) -> dict[str,str]:
+    phones: dict[str,str] = {}
+    for k, v in (inv.get("site_phones") or {}).items():
+        sv = str(v)
+        if sv.isdigit() and len(sv) == 4:
+            phones[_normalize_site_key(k)] = sv
+    try:
+        import json
+        here = Path(__file__).resolve().parent
+        cpath = here / "data" / "clients.json"
+        if cpath.exists():
+            data = json.loads(cpath.read_text(encoding="utf-8"))
+            for c in data.get("clients", []):
+                for d in (c.get("divisions") or []):
+                    for s in (d.get("sites") or []):
+                        n = (s.get("name") or "").strip()
+                        ph = (s.get("phone") or "").strip()
+                        if n and ph.isdigit() and len(ph) == 4:
+                            phones.setdefault(_normalize_site_key(n), ph)
+    except Exception:
+        pass
+    return phones
+
+def _lookup_last4(phones: dict[str,str], desc: str) -> str | None:
+    if not desc: return None
+    key = _normalize_site_key(desc)
+    # direct
+    if key in phones:
+        return phones[key]
+    # try trimming VOICE/SMS
+    for suf in (" VOICE"," SMS"):
+        if key.endswith(suf):
+            k = key[:-len(suf)].strip()
+            if k in phones:
+                return phones[k]
+            key = k
+            break
+    # left side of dash
+    if " - " in key:
+        k = key.split(" - ",1)[0].strip()
+        if k in phones:
+            return phones[k]
+    return None
+def add_voice_items_to_invoice(inv: Dict[str, Any],
+                               files_with_sites: list[tuple[str | Path, str | None]],
+                               year: int | None = None,
+                               month: int | None = None,
+                               unit_price: float = UNIT_PRICE_VOICE) -> Dict[str, Any]:
+    """
+    High-level helper: aggregate voice items from CSVs and append them to `inv`.
+    Decorates each description with (-LAST4) when we can infer a phone for the site.
+    Returns the modified invoice (same object).
+    """
+    items = aggregate_voice_items_from_csvs(files_with_sites, year, month)
+    phones = _build_priority_phone_map(inv)
+    for it in items:
+        desc = str(it.get("description", "")).strip()
+        # strip VOICE/SMS decoration that came from the file-type
+        for suf in (" – VOICE"," – SMS"," VOICE"," SMS"):
+            if desc.endswith(suf):
+                desc = desc[:-len(suf)].strip()
+        last4 = _lookup_last4(phones, desc)
+        if last4:
+            desc = f"{desc} (-{last4})"
+        add_line_item(inv, desc, it.get("qty", 0), unit_price)
+    return inv
+
+def add_message_items_to_invoice(
+    inv: dict,
+    messages_with_sites: list[tuple[str, str | None]],
+    year: int,
+    month: int,
+    unit_price: float = UNIT_PRICE_SMS,   # uses your existing constant
+) -> None:
+    """
+    Aggregate message rows per site (within selected month/year) and add
+    one line item per site with:
+      - description: <Site Name> (-LAST4) when we can resolve it
+      - qty: row count for that site
+      - unit_price: passed in (e.g., 0.07)
+    """
+    # Count rows by site for this month/year
+    counts = _aggregate_rows_by_site(messages_with_sites, "messages", year, month)
+
+    # Build a NAME->last4 map, prioritizing UI-harvested phones then clients.json
+    phones = _build_priority_phone_map(inv)
+
+    for site, qty in sorted(counts.items()):
+        desc = site or ""
+        last4 = _lookup_last4(phones, desc)
+        if last4:
+            desc = f"{desc} (-{last4})"
+
+        # Column mapping is handled by export: E=qty, F=unit, H=amount
+        _add_item(inv, desc, qty, unit_price)
+
+    _recompute_totals(inv)
+
+# ---------- Simple CSV export for invoices ----------
+
+def invoice_filename(inv: Dict[str, Any], ext: str) -> str:
+    """Generate a human-friendly filename like Invoice-YYYY-MM-<id>.<ext>"""
+    per = inv.get("period") or {}
+    y = per.get("year")
+    m = per.get("month")
+    ym = f"{y}-{int(m):02d}" if y and m else "unknown"
+    return f"Invoice-{ym}-{inv.get('id','')}.{ext.lstrip('.')}"
+
+def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -> Path:
+    """
+    Export an invoice (from dict) to CSV with columns:
+    Description,Qty,Unit Price,Amount,Subtotal,Tax,Total
+    Saves to the remembered invoice_output_dir() if out_dir not provided.
+    Returns the CSV path.
+    """
+    _recalc_totals(inv)
+    if out_dir is None:
+        out_dir = invoice_output_dir() or INVOICES_DIR
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / invoice_filename(inv, "csv")
+
+    import io, csv as _csv
+    buf = io.StringIO()
+    w = _csv.writer(buf, lineterminator="\\n")
+    w.writerow(["Description", "Qty", "Unit Price", "Amount"])
+    for li in inv.get("line_items", []):
+        w.writerow([li.get("description",""), li.get("qty",0), li.get("unit_price",0), li.get("amount",0)])
+    w.writerow([])
+    totals = inv.get("totals", {})
+    w.writerow(["Subtotal", "", "", totals.get("subtotal", 0)])
+    w.writerow(["Tax", "", "", totals.get("tax", 0)])
+    w.writerow(["Total", "", "", totals.get("total", 0)])
+
+    csv_path.write_text(buf.getvalue(), encoding="utf-8")
+    return csv_path
+
+# ---------- Simple PDF export (ReportLab) ----------
+
+def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -> Path:
+    """
+    Export the invoice as a simple PDF using reportlab (pip install reportlab).
+    Layout: header, period, table (Description, Qty, Unit Price, Amount), totals.
+    Saves into the remembered invoice folder if out_dir is None.
+    Returns the PDF path.
+    """
+    try:
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.units import inch
+    except Exception as e:
+        raise RuntimeError("reportlab is required: pip install reportlab") from e
+
+    _recalc_totals(inv)
+    if out_dir is None:
+        out_dir = invoice_output_dir() or INVOICES_DIR
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pdf_path = out_dir / invoice_filename(inv, "pdf")
+
+    # --- basic layout ---
+    c = canvas.Canvas(str(pdf_path), pagesize=LETTER)
+    width, height = LETTER
+    x_margin = 0.75 * inch
+    y = height - 0.75 * inch
+
+    # Header
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(x_margin, y, "INVOICE")
+    y -= 18
+
+    per = inv.get("period") or {}
+    period_text = f"Period: {per.get('year','')} - {int(per.get('month',0)):02d}" if per else ""
+    c.setFont("Helvetica", 10)
+    if period_text:
+        c.drawString(x_margin, y, period_text)
+        y -= 14
+    inv_id = inv.get("id", "")
+    c.drawString(x_margin, y, f"Invoice ID: {inv_id}")
+    y -= 20
+
+    # Client snapshot if present
+    snap = inv.get("client_name_snapshot", "")
+    if snap:
+        c.drawString(x_margin, y, f"Client: {snap}")
+        y -= 16
+
+    # Table header
+    c.setFont("Helvetica-Bold", 10)
+    col_desc_x = x_margin
+    col_qty_x  = x_margin + 4.6 * inch
+    col_unit_x = x_margin + 5.4 * inch
+    col_amt_x  = x_margin + 6.3 * inch
+    c.drawString(col_desc_x, y, "Description")
+    c.drawString(col_qty_x,  y, "Qty")
+    c.drawString(col_unit_x, y, "Unit Price")
+    c.drawString(col_amt_x,  y, "Amount")
+    y -= 12
+    c.line(x_margin, y, width - x_margin, y)
+    y -= 8
+
+    c.setFont("Helvetica", 10)
+    for li in inv.get("line_items", []):
+        if y < 1.3 * inch:
+            c.showPage()
+            y = height - 0.75 * inch
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(col_desc_x, y, "Description")
+            c.drawString(col_qty_x,  y, "Qty")
+            c.drawString(col_unit_x, y, "Unit Price")
+            c.drawString(col_amt_x,  y, "Amount")
+            y -= 12
+            c.line(x_margin, y, width - x_margin, y)
+            y -= 8
+            c.setFont("Helvetica", 10)
+
+        desc = str(li.get("description", ""))[:80]
+        qty = f"{li.get('qty', 0):.0f}".rstrip("0").rstrip(".")
+        unit = f"{li.get('unit_price', 0):.2f}"
+        amt = f"{li.get('amount', 0):.2f}"
+        c.drawString(col_desc_x, y, desc)
+        c.drawRightString(col_qty_x + 0.5*inch, y, qty)
+        c.drawRightString(col_unit_x + 0.8*inch, y, unit)
+        c.drawRightString(col_amt_x + 0.8*inch, y, amt)
+        y -= 14
+
+    y -= 6
+    c.line(x_margin, y, width - x_margin, y)
+    y -= 12
+
+    totals = inv.get("totals", {})
+    c.setFont("Helvetica-Bold", 10)
+    c.drawRightString(col_unit_x + 0.8*inch, y, "Subtotal:")
+    c.drawRightString(col_amt_x + 0.8*inch, y, f"{totals.get('subtotal', 0):.2f}")
+    y -= 14
+    c.drawRightString(col_unit_x + 0.8*inch, y, "Tax:")
+    c.drawRightString(col_amt_x + 0.8*inch, y, f"{totals.get('tax', 0):.2f}")
+    y -= 14
+    c.drawRightString(col_unit_x + 0.8*inch, y, "Total:")
+    c.drawRightString(col_amt_x + 0.8*inch, y, f"{totals.get('total', 0):.2f}")
+
+    c.showPage()
+    c.save()
+    return pdf_path
+
+# ---------- Excel template → PDF export (Windows, requires Excel) ----------
+def _load_clients_doc(path: str | Path | None) -> dict:
+    try:
+        p = Path(path) if path else DATA_DIR / "clients.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _find_client_address(clients_doc: dict, name_snapshot: str | None) -> list[str]:
+    """Return up to 3 lines for the client's billing block (name + address)."""
+    if not name_snapshot:
+        return []
+    # Try exact name match at top-level clients
+    items = clients_doc.get("clients") or clients_doc.get("items") or []
+    for c in items:
+        if (c.get("name") or "").strip() == name_snapshot.strip():
+            addr = (c.get("address") or "").strip()
+            lines = [name_snapshot]
+            if addr:
+                for line in addr.splitlines():
+                    if line.strip():
+                        lines.append(line.strip())
+            return lines[:3]
+    # Fallback: just the snapshot name
+    return [name_snapshot]
+
+def export_invoice_pdf_via_template(inv: Dict[str, Any],
+                                    template_path: str | Path,
+                                    out_dir: str | Path | None = None,
+                                    clients_path: str | Path | None = None) -> Path:
+    """
+    Fill an Excel .xlsm template and export as PDF (Windows-only, requires Excel).
+    Template assumptions (based on 'SanteTemplate'):
+      - 'INVOICE #' at G4, value at G5
+      - 'DATE' at H4, value at H5
+      - 'BILL TO' at A7; lines at A8..A10
+      - 'TERMS' at H7; value at H8
+      - Items table header at row 12; first item row at 13:
+            A13 description, F13 qty, G13 unit, H13 amount (=F*G)
+        (we fill rows 13..n, leave formulas for amounts/totals)
+      - Totals formulas already exist in H16/H17
+    """
+    from datetime import datetime
+    import openpyxl
+    tpl = Path(template_path)
+    if not tpl.exists():
+        raise FileNotFoundError(f"Template not found: {tpl}")
+    if out_dir is None:
+        out_dir = invoice_output_dir() or INVOICES_DIR
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load template and active sheet
+    wb = openpyxl.load_workbook(tpl, data_only=False, keep_vba=True)
+    ws = wb.active
+
+    # Fill header
+    inv_num = inv.get("starting_invoice_number") or inv.get("human_number") or inv.get("id")
+    ws["G5"].value = inv_num
+    # Use today's date or first day of period
+    per = inv.get("period") or {}
+    try:
+        dt = datetime(per.get("year", datetime.today().year), per.get("month", datetime.today().month), 1)
+    except Exception:
+        dt = datetime.today()
+    ws["H5"].value = dt
+
+    # Terms
+    ws["H8"].value = ws["H8"].value or "Due on Receipt"
+
+    # Bill-to
+    clients_doc = _load_clients_doc(clients_path)
+    bill_lines = _find_client_address(clients_doc, inv.get("client_name_snapshot"))
+    # place into A8..A10
+    for i in range(3):
+        cell = f"A{8+i}"
+        ws[cell].value = bill_lines[i] if i < len(bill_lines) else None
+
+    # Items: rows start at 13
+    row = 13
+    for li in inv.get("line_items", []):
+        ws[f"A{row}"].value = li.get("description", "")
+        ws[f"F{row}"].value = float(li.get("qty", 0))
+        ws[f"G{row}"].value = float(li.get("unit_price", 0))
+        # H{row} has formula already in template (if within initial rows). For extra rows, set formula.
+        if ws[f"H{row}"].value in (None, ""):
+            ws[f"H{row}"].value = f"=F{row}*G{row}"
+        row += 1
+
+
+    # Update totals to reflect the filled range
+    last_item_row = row - 1 if row > 13 else 13
+    try:
+        ws['H16'].value = f"=SUM(H13:H{last_item_row})"
+        ws['H17'].value = f"=H16"
+    except Exception:
+        pass
+
+    # Save a temp xlsm (so we don't overwrite the original template)
+    tmp_xlsm = out_dir / (invoice_filename(inv, "xlsm").replace(".xlsm", "") + ".xlsm")
+    wb.save(tmp_xlsm)
+
+    # Try to export via Excel COM (Windows)
+    pdf_path = out_dir / invoice_filename(inv, "pdf")
+    try:
+        import win32com.client  # type: ignore
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False
+        wb_com = excel.Workbooks.Open(str(tmp_xlsm))
+        # Export as PDF
+        xlTypePDF = 0
+        wb_com.ExportAsFixedFormat(xlTypePDF, str(pdf_path))
+        wb_com.Close(False)
+        excel.Quit()
+        return pdf_path
+    except Exception as e:
+        # Fallback: return the filled xlsm path and raise to signal missing COM/Excel
+        raise RuntimeError(f"Excel export failed (install Excel + pywin32). Filled workbook at: {tmp_xlsm}") from e
+
+# ====== AUTO-ADDED COMPAT SHIMS & SMS SUPPORT ======
+
