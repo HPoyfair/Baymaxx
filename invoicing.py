@@ -1375,105 +1375,253 @@ def _find_client_address(clients_doc: dict, name_snapshot: str | None) -> list[s
     # Fallback: just the snapshot name
     return [name_snapshot]
 
+# === BEGIN: exporter decoration helpers (idempotent) ===
+import re as _re_dec
+
+def _infer_kind_and_base(desc: str) -> tuple[str|None, str]:
+    """Strip trailing '— Voice/— SMS' variants, return (kind, base)."""
+    if not isinstance(desc, str):
+        return (None, "")
+    s = desc.strip()
+    # Common trailing junk variants
+    tails = (
+        " — Voice"," — VOICE"," – Voice"," – VOICE"," - Voice"," - VOICE",
+        " — Sms"," — SMS"," – Sms"," – SMS"," - Sms"," - SMS",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suf in tails:
+            if s.endswith(suf):
+                s = s[:-len(suf)].rstrip()
+                changed = True
+    up = s.upper()
+    if up.endswith(" SMS"):
+        return "SMS", s[:-3].rstrip()
+    if up.endswith(" VOICE"):
+        return "VOICE", s[:-5].rstrip()
+    return None, s
+
+def _phones_map_from_inv(inv: dict) -> dict[str, str]:
+    """Combine your _build_priority_phone_map and inv['site_phones']; normalize to last-4."""
+    phones: dict[str, str] = {}
+    try:
+        bpm = globals().get("_build_priority_phone_map")
+        if callable(bpm):
+            pm = bpm(inv) or {}
+            for k, v in pm.items():
+                if k:
+                    phones[k] = str(v or "")[-4:]
+    except Exception:
+        pass
+    if not phones and isinstance(inv.get("site_phones"), dict):
+        for k, v in inv["site_phones"].items():
+            if k and v:
+                phones[k] = str(v)[-4:]
+    return phones
+
+def _decorate_with_last4_kind(inv: dict, desc: str) -> str:
+    """Return description with (-LAST4) when resolvable; prefer '<base> KIND' then base; fallback longest substring match."""
+    if not isinstance(desc, str) or not desc.strip():
+        return desc
+    if _re_dec.search(r'\(-\d{3,4}\)\s*$', desc):
+        return desc
+    kind, base = _infer_kind_and_base(desc)
+    phones = _phones_map_from_inv(inv)
+    # exact base+kind, then base
+    for key in ([f"{base} {kind}"] if kind else []) + [base]:
+        last4 = phones.get(key)
+        if last4:
+            return f"{base} (-{str(last4)[-4:]})"
+    # longest substring match
+    target = (f"{base} {kind}" if kind else base).upper()
+    best_k, best_len = None, -1
+    for k in phones.keys():
+        ku = str(k).upper()
+        if ku in target or target in ku:
+            if len(ku) > best_len:
+                best_k, best_len = k, len(ku)
+    if best_k and phones.get(best_k):
+        return f"{base} (-{phones[best_k][-4:]})"
+    return base
+# === END: exporter decoration helpers ===
+
+
+
+from pathlib import Path
+from typing import Any, Dict, List
+
 def export_invoice_pdf_via_template(inv: Dict[str, Any],
                                     template_path: str | Path,
                                     out_dir: str | Path | None = None,
                                     clients_path: str | Path | None = None) -> Path:
     """
-    Fill an Excel .xlsm template and export as PDF (Windows-only, requires Excel).
-    Template assumptions (based on 'SanteTemplate'):
-      - 'INVOICE #' at G4, value at G5
-      - 'DATE' at H4, value at H5
-      - 'BILL TO' at A7; lines at A8..A10
-      - 'TERMS' at H7; value at H8
-      - Items table header at row 12; first item row at 13:
-            A13 description, F13 qty, G13 unit, H13 amount (=F*G)
-        (we fill rows 13..n, leave formulas for amounts/totals)
-      - Totals formulas already exist in H16/H17
+    Export invoice to Excel (and PDF via Excel COM) with:
+      - Date = TODAY written to H5 (and H7 as backup), m/d/yyyy
+      - Reads inv["line_items"]; writes A=Desc, F=Qty, G=Unit, H=Amount (=F*G), start row 13
+      - Description gets (-LAST4) when resolvable (kind-aware VOICE/SMS)
+      - Bill-To to A8..A10 (uses your helpers if available)
+      - Preserves SUBTOTAL/TOTAL rows; if empty, fills them
     """
-    from datetime import datetime
     import openpyxl
+    from openpyxl import load_workbook
+    from datetime import datetime
+
     tpl = Path(template_path)
     if not tpl.exists():
         raise FileNotFoundError(f"Template not found: {tpl}")
+
     if out_dir is None:
-        out_dir = invoice_output_dir() or INVOICES_DIR
+        try:
+            out_dir = invoice_output_dir() or INVOICES_DIR
+        except NameError:
+            out_dir = Path("invoices_output")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load template and active sheet
-    wb = openpyxl.load_workbook(tpl, data_only=False, keep_vba=True)
+    wb = load_workbook(tpl, data_only=False, keep_vba=True)
     ws = wb.active
 
-    # Fill header
-    inv_num = inv.get("starting_invoice_number") or inv.get("human_number") or inv.get("id")
-    ws["G5"].value = inv_num
-    # Use today's date or first day of period
-    per = inv.get("period") or {}
+    # Header
+    inv_num = inv.get("human_number") or inv.get("starting_invoice_number") or inv.get("id")
     try:
-        dt = datetime(per.get("year", datetime.today().year), per.get("month", datetime.today().month), 1)
-    except Exception:
-        dt = datetime.today()
-    ws["H5"].value = dt
-
-    # Override date to TODAY for final output
-    from datetime import datetime as _dt_patch
-    ws["H5"].value = _dt_patch.today()
-    try:
-        ws["H5"].number_format = "m/d/yyyy"
+        ws["G5"].value = inv_num
     except Exception:
         pass
-    # Terms
-    ws["H8"].value = ws["H8"].value or "Due on Receipt"
 
-    # Bill-to
-    clients_doc = _load_clients_doc(clients_path)
-    bill_lines = _find_client_address(clients_doc, inv.get("client_name_snapshot"))
-    # place into A8..A10
-    for i in range(3):
-        cell = f"A{8+i}"
-        ws[cell].value = bill_lines[i] if i < len(bill_lines) else None
+    # Date: today -> H5 (and H7 backup), formatted
+    today = datetime.today()
+    for cell in ("H5", "H7"):
+        try:
+            ws[cell].value = today
+            ws[cell].number_format = "m/d/yyyy"
+        except Exception:
+            pass
 
-    # Items: rows start at 13
+    # Terms default
+    try:
+        if not ws["H8"].value or str(ws["H8"].value).strip() == "":
+            ws["H8"].value = "Due on Receipt"
+    except Exception:
+        pass
+
+    # Bill-To lines (A8..A10), prefer helpers if present
+    def _bill_to_lines() -> List[str]:
+        try:
+            load_clients = globals().get("_load_clients_doc")
+            find_addr = globals().get("_find_client_address")
+            if callable(load_clients) and callable(find_addr):
+                doc = load_clients(inv.get("clients_path") if clients_path is None else clients_path)
+                lines = find_addr(doc, inv.get("client_name_snapshot"))
+                if isinstance(lines, list) and lines:
+                    return [str(x) for x in lines][:3]
+        except Exception:
+            pass
+        client = inv.get("client_snapshot") or inv.get("client") or {}
+        name = (client.get("name") or "").strip()
+        addr = (client.get("address") or "").strip()
+        out: List[str] = []
+        if name:
+            out.append(name)
+        if addr:
+            for line in addr.splitlines():
+                line = line.strip()
+                if line:
+                    out.append(line)
+        return out[:3]
+
+    try:
+        lines = _bill_to_lines()
+        for i in range(3):
+            ws[f"A{8+i}"].value = lines[i] if i < len(lines) else None
+    except Exception:
+        pass
+
+    # Items
     row = 13
-    for li in inv.get("line_items", []):
-        ws[f"A{row}"].value = li.get("description", "")
-        ws[f"F{row}"].value = float(li.get("qty", 0))
-        ws[f"G{row}"].value = float(li.get("unit_price", 0))
-        # H{row} has formula already in template (if within initial rows). For extra rows, set formula.
-        if ws[f"H{row}"].value in (None, ""):
-            ws[f"H{row}"].value = f"=F{row}*G{row}"
+    line_items = inv.get("line_items", [])
+    if not isinstance(line_items, list) or not line_items:
+        line_items = inv.get("items", []) or []
+
+    for li in line_items:
+        # A=Desc, F=Qty, G=Unit, H=Amount (=F*G)
+        try:
+            raw_desc = li.get("description", "")
+            ws[f"A{row}"].value = _decorate_with_last4_kind(inv, raw_desc)
+        except Exception:
+            ws[f"A{row}"].value = li.get("description", "")
+        try:
+            ws[f"F{row}"].value = float(li.get("qty", 0) or 0.0)
+            ws[f"G{row}"].value = float(li.get("unit_price", 0) or 0.0)
+            if ws[f"H{row}"].value in (None, ""):
+                ws[f"H{row}"].value = f"=F{row}*G{row}"
+        except Exception:
+            pass
         row += 1
 
+    last_item_row = max(13, row - 1)
 
-    # Update totals to reflect the filled range
-    last_item_row = row - 1 if row > 13 else 13
+    # Locate SUBTOTAL and TOTAL labels; preserve those rows
+    def _find_label_row(label: str) -> int | None:
+        L = label.strip().upper()
+        for r in range(13, 200):
+            for c in range(1, 8):  # A..G
+                v = ws.cell(row=r, column=c).value
+                if isinstance(v, str) and v.strip().upper() == L:
+                    return r
+        return None
+
+    subtotal_row = _find_label_row("SUBTOTAL")
+    total_row = _find_label_row("TOTAL")
+
+    # Clear trailing item rows but NEVER touch subtotal/total block
+    start_clear = last_item_row + 1
+    stop_clear = subtotal_row if subtotal_row else (last_item_row + 1)
+    if subtotal_row and start_clear < subtotal_row:
+        for r in range(start_clear, subtotal_row):
+            for c in ("A","F","G","H"):
+                try:
+                    ws[f"{c}{r}"].value = None
+                except Exception:
+                    pass
+
+    # Ensure formulas if cells are blank (template sometimes leaves them empty in copies)
+    subtotal_formula = f"=SUM(H13:H{last_item_row})"
     try:
-        ws['H16'].value = f"=SUM(H13:H{last_item_row})"
-        ws['H17'].value = f"=H16"
+        if subtotal_row:
+            if ws[f"H{subtotal_row}"].value in (None, ""):
+                ws[f"H{subtotal_row}"].value = subtotal_formula
+        else:
+            # conservative default
+            ws["H16"].value = subtotal_formula
+            subtotal_row = 16
+    except Exception:
+        pass
+    try:
+        if total_row:
+            if ws[f"H{total_row}"].value in (None, ""):
+                ws[f"H{total_row}"].value = f"=H{subtotal_row}"
+        else:
+            ws["H17"].value = f"=H{subtotal_row}"
     except Exception:
         pass
 
-    # Save a temp xlsm (so we don't overwrite the original template)
-    tmp_xlsm = out_dir / (invoice_filename(inv, "xlsm").replace(".xlsm", "") + ".xlsm")
-    wb.save(tmp_xlsm)
+    # Save & export
+    xlsm_path = out_dir / invoice_filename(inv, "xlsm")
+    wb.save(xlsm_path)
 
-    # Try to export via Excel COM (Windows)
     pdf_path = out_dir / invoice_filename(inv, "pdf")
     try:
         import win32com.client  # type: ignore
         excel = win32com.client.Dispatch("Excel.Application")
         excel.Visible = False
-        wb_com = excel.Workbooks.Open(str(tmp_xlsm))
-        # Export as PDF
+        wb_com = excel.Workbooks.Open(str(xlsm_path))
         xlTypePDF = 0
         wb_com.ExportAsFixedFormat(xlTypePDF, str(pdf_path))
         wb_com.Close(False)
         excel.Quit()
         return pdf_path
     except Exception as e:
-        # Fallback: return the filled xlsm path and raise to signal missing COM/Excel
-        raise RuntimeError(f"Excel export failed (install Excel + pywin32). Filled workbook at: {tmp_xlsm}") from e
+        raise RuntimeError(f"Excel export failed (install Excel + pywin32). Filled workbook at: {xlsm_path}") from e
 
-# ====== AUTO-ADDED COMPAT SHIMS & SMS SUPPORT ======
 
