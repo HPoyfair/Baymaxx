@@ -1456,21 +1456,24 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
                                     out_dir: str | Path | None = None,
                                     clients_path: str | Path | None = None) -> Path:
     """
-    Export invoice to Excel (and PDF via Excel COM) with:
-      - Date = TODAY written to H5 (and H7 as backup), m/d/yyyy
-      - Reads inv["line_items"]; writes A=Desc, F=Qty, G=Unit, H=Amount (=F*G), start row 13
-      - Description gets (-LAST4) when resolvable (kind-aware VOICE/SMS)
-      - Bill-To to A8..A10 (uses your helpers if available)
-      - Preserves SUBTOTAL/TOTAL rows; if empty, fills them
+    Drop-in replacement.
+    Keeps your working behavior (reads inv["line_items"]) and fixes:
+      • H5/H7 = today's date (m/d/yyyy)
+      • Description keeps VOICE/SMS in the text AND appends (-LAST4)
+      • A/F/G/H mapping with H = F*G
+      • Bill-To A8..A10
+      • Subtotal/Total preserved or filled if blank
     """
     import openpyxl
     from openpyxl import load_workbook
     from datetime import datetime
+    import re as _re
 
     tpl = Path(template_path)
     if not tpl.exists():
         raise FileNotFoundError(f"Template not found: {tpl}")
 
+    # Resolve output dir
     if out_dir is None:
         try:
             out_dir = invoice_output_dir() or INVOICES_DIR
@@ -1482,14 +1485,14 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     wb = load_workbook(tpl, data_only=False, keep_vba=True)
     ws = wb.active
 
-    # Header
+    # ----- Header -----
     inv_num = inv.get("human_number") or inv.get("starting_invoice_number") or inv.get("id")
     try:
         ws["G5"].value = inv_num
     except Exception:
         pass
 
-    # Date: today -> H5 (and H7 backup), formatted
+    # Date -> H5 (primary) and H7 (backup)
     today = datetime.today()
     for cell in ("H5", "H7"):
         try:
@@ -1505,7 +1508,7 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     except Exception:
         pass
 
-    # Bill-To lines (A8..A10), prefer helpers if present
+    # ----- Bill-To (A8..A10) -----
     def _bill_to_lines() -> List[str]:
         try:
             load_clients = globals().get("_load_clients_doc")
@@ -1537,17 +1540,81 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     except Exception:
         pass
 
-    # Items
+    # ----- Description decoration: KEEP kind label in the printed text -----
+    _VOICE_SMS_SUFFIXES = (
+        " — Voice"," — VOICE"," – Voice"," – VOICE"," - Voice"," - VOICE",
+        " — Sms"," — SMS"," – Sms"," – SMS"," - Sms"," - SMS",
+    )
+    def _phones_map_from_inv(_inv: Dict[str, Any]) -> Dict[str, str]:
+        try:
+            bpm = globals().get("_build_priority_phone_map")
+            if callable(bpm):
+                pm = bpm(_inv) or {}
+                return {k: str(v or "")[-4:] for k, v in pm.items() if k}
+        except Exception:
+            pass
+        pm = {}
+        for k, v in (_inv.get("site_phones") or {}).items():
+            if k and v:
+                pm[k] = str(v)[-4:]
+        return pm
+
+    def _infer_kind_and_base(desc: str) -> tuple[str | None, str]:
+        s = (desc or "").strip()
+        # Strip trailing punctuation-marked decorations to get base; we'll re-add kind explicitly
+        changed = True
+        while changed:
+            changed = False
+            for suf in _VOICE_SMS_SUFFIXES:
+                if s.endswith(suf):
+                    s = s[:-len(suf)].rstrip()
+                    changed = True
+        up = s.upper()
+        if up.endswith(" SMS"):
+            return "SMS", s[:-3].rstrip()
+        if up.endswith(" VOICE"):
+            return "VOICE", s[:-5].rstrip()
+        return None, s
+
+    def _decorate_with_last4_keep_kind(_inv: Dict[str, Any], desc: str) -> str:
+        """Return '<base> <KIND> (-LAST4)' (KIND kept) when resolvable; otherwise '<base> <KIND>'."""
+        if not isinstance(desc, str) or not desc.strip():
+            return desc
+        # If already ends with (-dddd), keep original (assume kind already present)
+        if _re.search(r"\(-\d{3,4}\)\s*$", desc):
+            return desc
+        kind, base = _infer_kind_and_base(desc)
+        label = f"{base} {kind}" if kind else base  # << keep VOICE/SMS in printed text
+        phones = _phones_map_from_inv(_inv)
+
+        # Prefer exact match on '<base> KIND', then 'base'
+        for key in ([label] if kind else []) + [base]:
+            last4 = phones.get(key)
+            if last4:
+                return f"{label} (-{str(last4)[-4:]})"
+
+        # Fallback: longest substring match
+        target = label.upper()
+        best_key, best_len = None, -1
+        for k in phones.keys():
+            ku = str(k).upper()
+            if ku in target or target in ku:
+                if len(ku) > best_len:
+                    best_key, best_len = k, len(ku)
+        if best_key and phones.get(best_key):
+            return f"{label} (-{phones[best_key][-4:]})"
+        return label
+
+    # ----- Items (A/F/G/H) -----
     row = 13
     line_items = inv.get("line_items", [])
     if not isinstance(line_items, list) or not line_items:
         line_items = inv.get("items", []) or []
 
     for li in line_items:
-        # A=Desc, F=Qty, G=Unit, H=Amount (=F*G)
         try:
             raw_desc = li.get("description", "")
-            ws[f"A{row}"].value = _decorate_with_last4_kind(inv, raw_desc)
+            ws[f"A{row}"].value = _decorate_with_last4_keep_kind(inv, raw_desc)
         except Exception:
             ws[f"A{row}"].value = li.get("description", "")
         try:
@@ -1561,7 +1628,7 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
 
     last_item_row = max(13, row - 1)
 
-    # Locate SUBTOTAL and TOTAL labels; preserve those rows
+    # ----- Subtotal / Total (preserve labels, fill if blank) -----
     def _find_label_row(label: str) -> int | None:
         L = label.strip().upper()
         for r in range(13, 200):
@@ -1574,9 +1641,9 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     subtotal_row = _find_label_row("SUBTOTAL")
     total_row = _find_label_row("TOTAL")
 
-    # Clear trailing item rows but NEVER touch subtotal/total block
+    # Clear trailing items but do NOT touch the subtotal/total block
     start_clear = last_item_row + 1
-    stop_clear = subtotal_row if subtotal_row else (last_item_row + 1)
+    stop_clear = subtotal_row if subtotal_row else start_clear
     if subtotal_row and start_clear < subtotal_row:
         for r in range(start_clear, subtotal_row):
             for c in ("A","F","G","H"):
@@ -1585,14 +1652,12 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
                 except Exception:
                     pass
 
-    # Ensure formulas if cells are blank (template sometimes leaves them empty in copies)
     subtotal_formula = f"=SUM(H13:H{last_item_row})"
     try:
         if subtotal_row:
             if ws[f"H{subtotal_row}"].value in (None, ""):
                 ws[f"H{subtotal_row}"].value = subtotal_formula
         else:
-            # conservative default
             ws["H16"].value = subtotal_formula
             subtotal_row = 16
     except Exception:
@@ -1623,5 +1688,3 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         return pdf_path
     except Exception as e:
         raise RuntimeError(f"Excel export failed (install Excel + pywin32). Filled workbook at: {xlsm_path}") from e
-
-
