@@ -1416,6 +1416,13 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         dt = datetime.today()
     ws["H5"].value = dt
 
+    # Override date to TODAY for final output
+    from datetime import datetime as _dt_patch
+    ws["H5"].value = _dt_patch.today()
+    try:
+        ws["H5"].number_format = "m/d/yyyy"
+    except Exception:
+        pass
     # Terms
     ws["H8"].value = ws["H8"].value or "Due on Receipt"
 
