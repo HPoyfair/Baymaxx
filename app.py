@@ -1101,7 +1101,7 @@ class ViewInvoicesView(ttk.Frame):
             self.tree.insert("", tk.END, values=(pid, ptype, ptxt, client, f"{total:,.2f}"))
 # ---------------- Helpers for invoice edits & finalize ----------------
 
-def _load_clients_doc(path):
+def load_clients_doc(path):
     """Load data/clients.json -> dict (return {} if missing/bad)."""
     try:
         import json
@@ -1130,7 +1130,7 @@ def _normalize_site_key(s: str) -> str:
     u = re.sub(r"\s+", " ", u)
     return u
 
-def _decorate_descriptions_with_last4(inv_obj: dict, site_phones: dict) -> None:
+def decorate_descriptions_with_last4(inv_obj: dict, site_phones: dict) -> None:
     """
     Append ' (-LAST4)' to each description when we have a phone match.
     We DON'T remove VOICE/SMS text from names; we only add the suffix.
@@ -1152,7 +1152,7 @@ def _decorate_descriptions_with_last4(inv_obj: dict, site_phones: dict) -> None:
         if last4 and len(str(last4)) == 4 and str(last4).isdigit():
             li["description"] = f"{desc} (-{last4})"
 
-def _infer_parent_billto_from_clients(inv_obj: dict, clients_doc: dict) -> None:
+def infer_parent_billto_from_clients(inv_obj: dict, clients_doc: dict) -> None:
     """
     Look up the parent organization for any site in line_items and set inv_obj['client']
     to {'name': PARENT_NAME, 'address': ADDRESS, 'contact': optional}.

@@ -1,0 +1,33 @@
+{
+  "id": "d2410b85-e069-4812-ad32-3612fe94315b",
+  "type": "monthly",
+  "period": {
+    "year": 2025,
+    "month": 5
+  },
+  "client_id": null,
+  "client_name_snapshot": "Sante Foundation Medical Group (\"SFMG\")",
+  "created_at": null,
+  "tax_rate": 0.0,
+  "line_items": [
+    {
+      "description": "WOMENS SPECIALTY AND FERTILITY CLINIC VOICE — Voice",
+      "qty": 336.0,
+      "unit_price": 0.14,
+      "amount": 47.04
+    },
+    {
+      "description": "WOMENS SPECIALTY AND FERTILITY CLINIC SMS SMS",
+      "qty": 730.0,
+      "unit_price": 0.14,
+      "amount": 102.2
+    }
+  ],
+  "totals": {
+    "subtotal": 149.24,
+    "tax": 0.0,
+    "total": 149.24
+  },
+  "notes": "",
+  "starting_invoice_number": 5
+}

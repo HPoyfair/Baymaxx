@@ -135,7 +135,7 @@ if '_recompute_totals' not in globals():
 try:
     UNIT_PRICE_SMS
 except NameError:
-    UNIT_PRICE_SMS = 0.07
+    UNIT_PRICE_SMS = 0.14
 
 # compat aliases if your project uses non-underscored names
 if '_add_item' not in globals() and 'add_item' in globals():
@@ -253,33 +253,6 @@ def _aggregate_rows_by_site(files_with_sites, kind: str, year: int, month: int) 
     return dict(counts)
 
 # ---------------- public API: messages ----------------
-def add_message_items_to_invoice(
-    inv: dict,
-    messages_with_sites: list[tuple[str, str | None]],
-    year: int,
-    month: int,
-    unit_price: float = UNIT_PRICE_SMS
-) -> None:
-    """
-    Aggregate message rows per site (within the selected month/year)
-    and append one line item per site:
-      - description: <Site Name> (-LAST4)  (when resolvable)
-      - qty: row count for that site
-      - unit_price: provided constant (e.g., 0.07)
-    """
-    counts = _aggregate_rows_by_site(messages_with_sites, "messages", year, month)
-    phones = _build_priority_phone_map(inv)
-
-    for site, qty in sorted(counts.items()):
-        desc = site or ""
-        last4 = _lookup_last4(phones, desc)
-        if last4:
-            desc = f"{desc} (-{last4})"
-        _add_item(inv, desc, qty, unit_price)
-
-    _recompute_totals(inv)
-
-# ================== END: messages support & compat helpers ==================
 
 
 def _recalc_totals(inv: Dict[str, Any]) -> None:
@@ -809,7 +782,7 @@ def check_csv_month_year(path: str | Path, kind: str, year: int, month: int) -> 
 try:
     UNIT_PRICE_SMS
 except NameError:
-    UNIT_PRICE_SMS = 0.07  # adjust if your SMS price is different
+    UNIT_PRICE_SMS = 0.14  # adjust if your SMS price is different
 
 # If your aggregator is exported without a leading underscore, alias it
 if '_aggregate_rows_by_site' not in globals() and 'aggregate_rows_by_site' in globals():
@@ -1168,38 +1141,7 @@ def add_voice_items_to_invoice(inv: Dict[str, Any],
         add_line_item(inv, desc, it.get("qty", 0), unit_price)
     return inv
 
-def add_message_items_to_invoice(
-    inv: dict,
-    messages_with_sites: list[tuple[str, str | None]],
-    year: int,
-    month: int,
-    unit_price: float = UNIT_PRICE_SMS,   # uses your existing constant
-) -> None:
-    """
-    Aggregate message rows per site (within selected month/year) and add
-    one line item per site with:
-      - description: <Site Name> (-LAST4) when we can resolve it
-      - qty: row count for that site
-      - unit_price: passed in (e.g., 0.07)
-    """
-    # Count rows by site for this month/year
-    counts = _aggregate_rows_by_site(messages_with_sites, "messages", year, month)
 
-    # Build a NAME->last4 map, prioritizing UI-harvested phones then clients.json
-    phones = _build_priority_phone_map(inv)
-
-    for site, qty in sorted(counts.items()):
-        desc = site or ""
-        last4 = _lookup_last4(phones, desc)
-        if last4:
-            desc = f"{desc} (-{last4})"
-
-        # Column mapping is handled by export: E=qty, F=unit, H=amount
-        _add_item(inv, desc, qty, unit_price)
-
-    _recompute_totals(inv)
-
-# ---------- Simple CSV export for invoices ----------
 
 def invoice_filename(inv: Dict[str, Any], ext: str) -> str:
     """Generate a human-friendly filename like Invoice-YYYY-MM-<id>.<ext>"""
@@ -1420,7 +1362,7 @@ def _phones_map_from_inv(inv: dict) -> dict[str, str]:
                 phones[k] = str(v)[-4:]
     return phones
 
-def _decorate_with_last4_kind(inv: dict, desc: str) -> str:
+def decorate_with_last4_kind(inv: dict, desc: str) -> str:
     """Return description with (-LAST4) when resolvable; prefer '<base> KIND' then base; fallback longest substring match."""
     if not isinstance(desc, str) or not desc.strip():
         return desc
@@ -1451,29 +1393,32 @@ def _decorate_with_last4_kind(inv: dict, desc: str) -> str:
 from pathlib import Path
 from typing import Any, Dict, List
 
+
+
+from pathlib import Path
+from typing import Any, Dict, List
+
 def export_invoice_pdf_via_template(inv: Dict[str, Any],
                                     template_path: str | Path,
                                     out_dir: str | Path | None = None,
                                     clients_path: str | Path | None = None) -> Path:
     """
-    Drop-in replacement.
-    Keeps your working behavior (reads inv["line_items"]) and fixes:
-      • H5/H7 = today's date (m/d/yyyy)
-      • Description keeps VOICE/SMS in the text AND appends (-LAST4)
-      • A/F/G/H mapping with H = F*G
-      • Bill-To A8..A10
-      • Subtotal/Total preserved or filled if blank
+    Export invoice to Excel (and PDF via Excel COM) with:
+      - Date = TODAY → H5 (and H7), m/d/yyyy
+      - Writes line items from inv["line_items"] (fallback to inv["items"]) starting at row 13
+        A=Description, F=Qty, G=Unit, H=Amount (=F*G)
+      - Keeps VOICE/SMS visible and appends (-LAST4) where resolvable
+      - Fills Bill-To A8..A10 (uses your helpers if available)
+      - Preserves SUBTOTAL/TOTAL rows (fills only if blank)
     """
     import openpyxl
     from openpyxl import load_workbook
     from datetime import datetime
-    import re as _re
 
     tpl = Path(template_path)
     if not tpl.exists():
         raise FileNotFoundError(f"Template not found: {tpl}")
 
-    # Resolve output dir
     if out_dir is None:
         try:
             out_dir = invoice_output_dir() or INVOICES_DIR
@@ -1485,14 +1430,14 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     wb = load_workbook(tpl, data_only=False, keep_vba=True)
     ws = wb.active
 
-    # ----- Header -----
+    # Header
     inv_num = inv.get("human_number") or inv.get("starting_invoice_number") or inv.get("id")
     try:
         ws["G5"].value = inv_num
     except Exception:
         pass
 
-    # Date -> H5 (primary) and H7 (backup)
+    # Date: today into H5 and H7
     today = datetime.today()
     for cell in ("H5", "H7"):
         try:
@@ -1501,14 +1446,14 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         except Exception:
             pass
 
-    # Terms default
+    # Terms
     try:
         if not ws["H8"].value or str(ws["H8"].value).strip() == "":
             ws["H8"].value = "Due on Receipt"
     except Exception:
         pass
 
-    # ----- Bill-To (A8..A10) -----
+    # Bill-To lines (A8..A10)
     def _bill_to_lines() -> List[str]:
         try:
             load_clients = globals().get("_load_clients_doc")
@@ -1524,13 +1469,11 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         name = (client.get("name") or "").strip()
         addr = (client.get("address") or "").strip()
         out: List[str] = []
-        if name:
-            out.append(name)
+        if name: out.append(name)
         if addr:
             for line in addr.splitlines():
                 line = line.strip()
-                if line:
-                    out.append(line)
+                if line: out.append(line)
         return out[:3]
 
     try:
@@ -1540,81 +1483,17 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     except Exception:
         pass
 
-    # ----- Description decoration: KEEP kind label in the printed text -----
-    _VOICE_SMS_SUFFIXES = (
-        " — Voice"," — VOICE"," – Voice"," – VOICE"," - Voice"," - VOICE",
-        " — Sms"," — SMS"," – Sms"," – SMS"," - Sms"," - SMS",
-    )
-    def _phones_map_from_inv(_inv: Dict[str, Any]) -> Dict[str, str]:
-        try:
-            bpm = globals().get("_build_priority_phone_map")
-            if callable(bpm):
-                pm = bpm(_inv) or {}
-                return {k: str(v or "")[-4:] for k, v in pm.items() if k}
-        except Exception:
-            pass
-        pm = {}
-        for k, v in (_inv.get("site_phones") or {}).items():
-            if k and v:
-                pm[k] = str(v)[-4:]
-        return pm
-
-    def _infer_kind_and_base(desc: str) -> tuple[str | None, str]:
-        s = (desc or "").strip()
-        # Strip trailing punctuation-marked decorations to get base; we'll re-add kind explicitly
-        changed = True
-        while changed:
-            changed = False
-            for suf in _VOICE_SMS_SUFFIXES:
-                if s.endswith(suf):
-                    s = s[:-len(suf)].rstrip()
-                    changed = True
-        up = s.upper()
-        if up.endswith(" SMS"):
-            return "SMS", s[:-3].rstrip()
-        if up.endswith(" VOICE"):
-            return "VOICE", s[:-5].rstrip()
-        return None, s
-
-    def _decorate_with_last4_keep_kind(_inv: Dict[str, Any], desc: str) -> str:
-        """Return '<base> <KIND> (-LAST4)' (KIND kept) when resolvable; otherwise '<base> <KIND>'."""
-        if not isinstance(desc, str) or not desc.strip():
-            return desc
-        # If already ends with (-dddd), keep original (assume kind already present)
-        if _re.search(r"\(-\d{3,4}\)\s*$", desc):
-            return desc
-        kind, base = _infer_kind_and_base(desc)
-        label = f"{base} {kind}" if kind else base  # << keep VOICE/SMS in printed text
-        phones = _phones_map_from_inv(_inv)
-
-        # Prefer exact match on '<base> KIND', then 'base'
-        for key in ([label] if kind else []) + [base]:
-            last4 = phones.get(key)
-            if last4:
-                return f"{label} (-{str(last4)[-4:]})"
-
-        # Fallback: longest substring match
-        target = label.upper()
-        best_key, best_len = None, -1
-        for k in phones.keys():
-            ku = str(k).upper()
-            if ku in target or target in ku:
-                if len(ku) > best_len:
-                    best_key, best_len = k, len(ku)
-        if best_key and phones.get(best_key):
-            return f"{label} (-{phones[best_key][-4:]})"
-        return label
-
-    # ----- Items (A/F/G/H) -----
+    # Items
     row = 13
     line_items = inv.get("line_items", [])
     if not isinstance(line_items, list) or not line_items:
         line_items = inv.get("items", []) or []
 
     for li in line_items:
+        # A=Desc, F=Qty, G=Unit, H=Amount
         try:
             raw_desc = li.get("description", "")
-            ws[f"A{row}"].value = _decorate_with_last4_keep_kind(inv, raw_desc)
+            ws[f"A{row}"].value = decorate_with_last4_kind(inv, raw_desc)
         except Exception:
             ws[f"A{row}"].value = li.get("description", "")
         try:
@@ -1628,7 +1507,7 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
 
     last_item_row = max(13, row - 1)
 
-    # ----- Subtotal / Total (preserve labels, fill if blank) -----
+    # Locate labels
     def _find_label_row(label: str) -> int | None:
         L = label.strip().upper()
         for r in range(13, 200):
@@ -1641,7 +1520,7 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     subtotal_row = _find_label_row("SUBTOTAL")
     total_row = _find_label_row("TOTAL")
 
-    # Clear trailing items but do NOT touch the subtotal/total block
+    # Clear trailing items but NOT subtotal/total block
     start_clear = last_item_row + 1
     stop_clear = subtotal_row if subtotal_row else start_clear
     if subtotal_row and start_clear < subtotal_row:
@@ -1652,6 +1531,7 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
                 except Exception:
                     pass
 
+    # Ensure formulas if blank
     subtotal_formula = f"=SUM(H13:H{last_item_row})"
     try:
         if subtotal_row:
@@ -1688,3 +1568,103 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         return pdf_path
     except Exception as e:
         raise RuntimeError(f"Excel export failed (install Excel + pywin32). Filled workbook at: {xlsm_path}") from e
+
+
+
+
+# === BEGIN: message billing by segments (idempotent) ===
+from typing import Any, Dict, Iterable, List, Tuple
+import csv
+from pathlib import Path as _Path_seg
+
+def _ceil_div2(n: int) -> int:
+    """1–2→1, 3–4→2, 5–6→3, 7–8→4, ..."""
+    try:
+        x = int(float(n))
+    except Exception:
+        return 1
+    if x <= 0:
+        return 0
+    return (x + 1) // 2
+
+def _extract_num_segments(row: Dict[str, Any]) -> int:
+    """Robustly read NumSegments (handles common header variants)."""
+    candidates = ("NumSegments", "Numsegments", "numsegments",
+                  "Num_Segments", "NumSeg", "Numseg", "Segments", "segments")
+    for k in candidates:
+        if k in row and row[k] not in (None, "", "-"):
+            try:
+                return int(float(row[k]))
+            except Exception:
+                continue
+    return 1
+
+def _sum_billed_units_by_site(files_with_sites: List[Tuple[str | _Path_seg, str | None]],
+                              year: int, month: int) -> Dict[str, int]:
+    """
+    Open each messages CSV and compute billed units per site:
+      billed_units(row) = ceil(NumSegments/2) for rows in (year, month).
+    Returns {site_name: total_billed_units}.
+    """
+    from collections import defaultdict
+    totals: Dict[str, int] = defaultdict(int)
+
+    for path, site_name in (files_with_sites or []):
+        site = site_name or _Path_seg(path).stem
+        try:
+            with open(path, newline='', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Use your existing helper to parse row timestamp for messages
+                    try:
+                        dt = _extract_row_datetime(row, "messages")
+                    except Exception:
+                        dt = None
+                    if not dt or dt.year != int(year) or dt.month != int(month):
+                        continue
+                    seg = _extract_num_segments(row)
+                    totals[site] += _ceil_div2(seg)
+        except Exception:
+            # swallow unreadable files silently
+            pass
+    return dict(totals)
+
+def add_message_items_to_invoice(
+    inv: dict,
+    messages_with_sites: List[Tuple[str | _Path_seg, str | None]],
+    year: int,
+    month: int,
+    unit_price: float = 0.14,  # per your new rule
+) -> None:
+    """
+    Add one SMS line per site with:
+      - description: "<Site Name> SMS" (export adds (-LAST4) while keeping SMS label)
+      - qty: sum( ceil(NumSegments/2) ) for rows in (year, month)
+      - unit_price: default 0.14
+    """
+    billed = _sum_billed_units_by_site(messages_with_sites, year, month)
+
+    for site, qty in sorted(billed.items()):
+        if qty <= 0:
+            continue
+        desc = f"{site} SMS"
+        # rely on export to append (-LAST4) cleanly with kind kept
+        try:
+            _add_item(inv, desc, qty, unit_price)
+        except NameError:
+            inv.setdefault("line_items", []).append({
+                "description": desc,
+                "qty": qty,
+                "unit_price": unit_price,
+            })
+
+    # Recompute totals in-memory (Excel still computes H=F*G)
+    try:
+        _recalc_totals(inv)
+    except Exception:
+        try:
+            _recompute_totals(inv)
+        except Exception:
+            pass
+# === END: message billing by segments ===
+

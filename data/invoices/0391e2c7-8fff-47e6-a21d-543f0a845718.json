@@ -1,0 +1,176 @@
+{
+  "id": "0391e2c7-8fff-47e6-a21d-543f0a845718",
+  "type": "monthly",
+  "period": {
+    "year": 2025,
+    "month": 9
+  },
+  "client_id": null,
+  "client_name_snapshot": "Sante Foundation Medical Group (\"SFMG\")",
+  "created_at": null,
+  "tax_rate": 0.0,
+  "line_items": [
+    {
+      "description": "Voice",
+      "qty": 850.0,
+      "unit_price": 0.14,
+      "amount": 119.0
+    },
+    {
+      "description": "CCHLS Voice — Voice",
+      "qty": 353.0,
+      "unit_price": 0.14,
+      "amount": 49.42
+    },
+    {
+      "description": "CMP CLOVIS MEDICAL GROUP VOICE — Voice",
+      "qty": 1070.0,
+      "unit_price": 0.14,
+      "amount": 149.8
+    },
+    {
+      "description": "CMP Clovis SMS — Voice",
+      "qty": 1118.0,
+      "unit_price": 0.14,
+      "amount": 156.52
+    },
+    {
+      "description": "CMP West VOICE — Voice",
+      "qty": 1007.0,
+      "unit_price": 0.14,
+      "amount": 140.98
+    },
+    {
+      "description": "Fresno Digestive Health VOICE Fresno Digestive Health Chestnut — Voice",
+      "qty": 1683.0,
+      "unit_price": 0.14,
+      "amount": 235.62
+    },
+    {
+      "description": "PEACHWOOD PEDIATRICS VOICE — Voice",
+      "qty": 150.0,
+      "unit_price": 0.14,
+      "amount": 21.0
+    },
+    {
+      "description": "WOMENS SPECIALTY AND FERTILITY CLINIC VOICE — Voice",
+      "qty": 401.0,
+      "unit_price": 0.14,
+      "amount": 56.14
+    },
+    {
+      "description": "15594782575 SMS",
+      "qty": 4320.0,
+      "unit_price": 0.14,
+      "amount": 604.8
+    },
+    {
+      "description": "Adv Gastroenterlogy & Hepatology Associates SMS SMS",
+      "qty": 2969.0,
+      "unit_price": 0.14,
+      "amount": 415.66
+    },
+    {
+      "description": "CCHLS SMS SMS",
+      "qty": 560.0,
+      "unit_price": 0.14,
+      "amount": 78.4
+    },
+    {
+      "description": "CENTRAL VALLEY OBGYN SMS SMS",
+      "qty": 5588.0,
+      "unit_price": 0.14,
+      "amount": 782.32
+    },
+    {
+      "description": "CMP CLOVIS MEDICAL GROUP SMS SMS",
+      "qty": 1840.0,
+      "unit_price": 0.14,
+      "amount": 257.6
+    },
+    {
+      "description": "CMP NWMG FP East SMS SMS",
+      "qty": 2877.0,
+      "unit_price": 0.14,
+      "amount": 402.78
+    },
+    {
+      "description": "CMP NWMG FP West SMS SMS",
+      "qty": 2165.0,
+      "unit_price": 0.14,
+      "amount": 303.1
+    },
+    {
+      "description": "CMP NWMG Pediatrics SMS SMS",
+      "qty": 7410.0,
+      "unit_price": 0.14,
+      "amount": 1037.4
+    },
+    {
+      "description": "CMP West SMS SMS",
+      "qty": 1787.0,
+      "unit_price": 0.14,
+      "amount": 250.18
+    },
+    {
+      "description": "Fresno Digestive Health Herndon SMS",
+      "qty": 11734.0,
+      "unit_price": 0.14,
+      "amount": 1642.76
+    },
+    {
+      "description": "Fresno Digestive Health SMS Fresno Digestive Health Chestnut SMS",
+      "qty": 3076.0,
+      "unit_price": 0.14,
+      "amount": 430.64
+    },
+    {
+      "description": "PEACHWOOD PEDIATRICS SMS SMS",
+      "qty": 434.0,
+      "unit_price": 0.14,
+      "amount": 60.76
+    },
+    {
+      "description": "PEACHWOOD SMS SMS",
+      "qty": 2659.0,
+      "unit_price": 0.14,
+      "amount": 372.26
+    },
+    {
+      "description": "PEDS SMS",
+      "qty": 1593.0,
+      "unit_price": 0.14,
+      "amount": 223.02
+    },
+    {
+      "description": "Simonian Sports Medicine Clinic SMS SMS",
+      "qty": 3282.0,
+      "unit_price": 0.14,
+      "amount": 459.48
+    },
+    {
+      "description": "UroGynecology Specialty Center SMS",
+      "qty": 260.0,
+      "unit_price": 0.14,
+      "amount": 36.4
+    },
+    {
+      "description": "VALLEY SLEEP SMS SMS",
+      "qty": 4291.0,
+      "unit_price": 0.14,
+      "amount": 600.74
+    },
+    {
+      "description": "WOMENS SPECIALTY AND FERTILITY CLINIC SMS SMS",
+      "qty": 652.0,
+      "unit_price": 0.14,
+      "amount": 91.28
+    }
+  ],
+  "totals": {
+    "subtotal": 8978.06,
+    "tax": 0.0,
+    "total": 8978.06
+  },
+  "notes": ""
+}
