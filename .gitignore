@@ -1,0 +1,17 @@
+# Generated internal invoices – do NOT commit
+data/invoices/
+data/.state/
+
+# User-exported invoices
+invoices_output/
+invoices/
+
+# Python cache / build output / binaries
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+*.exe
+*.zip
+*.7z

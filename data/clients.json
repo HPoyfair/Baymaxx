@@ -1,0 +1,318 @@
+{
+  "version": 2,
+  "clients": [
+    {
+      "id": "7cb7878c-4ada-4199-944e-4fd9f4e93976",
+      "name": "Sante Foundation Medical Group (\"SFMG\")",
+      "address": "7370 N Palm Ave STE 101\nFresno, CA 93711",
+      "groups": [
+        {
+          "id": "5a4b7b69-0c22-4e34-8a65-e9722b375af9",
+          "name": "General",
+          "units": [
+            {
+              "id": "f722a858-5e0a-477a-aef8-4657f8a1f903",
+              "name": "CMP West",
+              "phone": ""
+            }
+          ]
+        }
+      ],
+      "suborgs": [
+        {
+          "id": "28db4189-c987-4c4e-828e-6f0740c6f6e8",
+          "name": "test",
+          "phone": "test"
+        }
+      ],
+      "divisions": [
+        {
+          "id": "b4045f3f-c1bd-4fbe-893e-5f2257811dd0",
+          "name": "CMP West SMS",
+          "sites": [
+            {
+              "id": "3ba51015-f60e-4405-bf24-1383364885a4",
+              "name": "CMP West SMS",
+              "phone": "2186"
+            },
+            {
+              "id": "1213b3cf-7d8e-41be-aa02-6406546dde9b",
+              "name": "CMP West VOICE",
+              "phone": "0800"
+            }
+          ]
+        },
+        {
+          "id": "ded6c9a6-7361-4535-9946-d5533a8df59b",
+          "name": "PEDS",
+          "sites": [
+            {
+              "id": "cb4b130c-c0a5-4cf2-803e-8450c4cc0f8f",
+              "name": "PEDS",
+              "phone": "2167"
+            }
+          ]
+        },
+        {
+          "id": "ad5abbd4-2c83-49ff-ab1b-16abe3f5032f",
+          "name": "UroGynecology Specialty Center",
+          "sites": [
+            {
+              "id": "850477de-42a4-4e67-abd9-bf8a09447798",
+              "name": "UroGynecology Specialty Center",
+              "phone": "2945"
+            }
+          ]
+        },
+        {
+          "id": "7cde712c-3c99-4486-8b06-f495b35d71b7",
+          "name": "Adv Gastroenterlogy & Hepatology Associates",
+          "sites": [
+            {
+              "id": "910d6bee-2398-4a5a-b01a-7bb61aa4d595",
+              "name": "Adv Gastroenterlogy & Hepatology Associates SMS",
+              "phone": "2323"
+            }
+          ]
+        },
+        {
+          "id": "96983453-50a6-4213-b33f-f2178cd63298",
+          "name": "Valley Sleep",
+          "sites": [
+            {
+              "id": "fc96d725-d806-4ed8-ad10-d3cd3f03ec66",
+              "name": "VALLEY SLEEP SMS",
+              "phone": "2955"
+            }
+          ]
+        },
+        {
+          "id": "47a8cb76-238f-43f3-a8dc-54cfc732b71a",
+          "name": "CMP CLOVIS MEDICAL GROUP",
+          "sites": [
+            {
+              "id": "af0b6872-9715-4168-a06b-836bc2fa3289",
+              "name": "CMP CLOVIS MEDICAL GROUP SMS",
+              "phone": "2150"
+            },
+            {
+              "id": "74e6da8d-bfc8-4b3e-9a91-acedc3d25dfb",
+              "name": "CMP CLOVIS MEDICAL GROUP VOICE",
+              "phone": "7294"
+            }
+          ]
+        },
+        {
+          "id": "cdcf0024-a5d1-454c-b4d1-3228131b0ce2",
+          "name": "CENTRAL VALLEY OBGYN",
+          "sites": [
+            {
+              "id": "0b3d19ae-5861-4924-ae53-1b0810e10b46",
+              "name": "CENTRAL VALLEY OBGYN SMS",
+              "phone": "2792"
+            }
+          ]
+        },
+        {
+          "id": "35f73a43-1c15-47c5-a0d9-7b022c8f297f",
+          "name": "CMP CARE CENTER NORTH",
+          "sites": [
+            {
+              "id": "a6a4a643-bc68-4531-bf49-29f2586a5ee5",
+              "name": "CMP CARE CENTER NORTH SMS",
+              "phone": "..."
+            },
+            {
+              "id": "f04110f9-3a97-4024-ae0b-65d1a4cf8bf7",
+              "name": "CMP CARE CENTER NORTH VOICE",
+              "phone": "..."
+            }
+          ]
+        },
+        {
+          "id": "8a67301f-f8b7-4acc-8438-5f0d6b55bfb9",
+          "name": "Fresno Digestive Health SMS Fresno Digestive Health",
+          "sites": [
+            {
+              "id": "57a9bf19-b008-4c5b-9442-970e0fd5e454",
+              "name": "Fresno Digestive Health Herndon",
+              "phone": "2187"
+            },
+            {
+              "id": "7eae1d48-28d3-454f-bd28-77e6c7fff19c",
+              "name": "Fresno Digestive Health SMS Fresno Digestive Health Chestnut",
+              "phone": "9098"
+            },
+            {
+              "id": "a0c5036a-1f5c-49b0-9a55-5d172279d7ee",
+              "name": "Fresno Digestive Health VOICE Fresno Digestive Health Chestnut",
+              "phone": "8200"
+            }
+          ]
+        },
+        {
+          "id": "6f5842dc-2b17-4a4b-bf79-ff38e2631a1a",
+          "name": "California Urology",
+          "sites": [
+            {
+              "id": "4ab92749-d867-4127-9c33-0bb198ffcd2e",
+              "name": "California Urology SMS",
+              "phone": "2201"
+            },
+            {
+              "id": "ee9bf0e1-928f-49d8-b65e-a7d4a5a7d71e",
+              "name": "California Urology Voice",
+              "phone": "4460"
+            }
+          ]
+        },
+        {
+          "id": "15be443d-59df-4f4a-9c4d-76af688b1b07",
+          "name": "PEACHWOOD",
+          "sites": [
+            {
+              "id": "40ab00cd-fd01-4bef-91a6-5e16af2003aa",
+              "name": "PEACHWOOD SMS",
+              "phone": "2327"
+            }
+          ]
+        },
+        {
+          "id": "820915ed-2c1b-457d-b457-766c6dab96ff",
+          "name": "PEACHWOOD PEDIATRICS",
+          "sites": [
+            {
+              "id": "bf4fc9ee-3451-4a14-95f2-23adc7d72a58",
+              "name": "PEACHWOOD PEDIATRICS SMS",
+              "phone": "2801"
+            },
+            {
+              "id": "9966cb93-869f-4c18-a150-da2a58b1e8e8",
+              "name": "PEACHWOOD PEDIATRICS VOICE",
+              "phone": "6202"
+            }
+          ]
+        },
+        {
+          "id": "cca9b667-44d8-4311-bc9c-3a0982179683",
+          "name": "WOMENS SPECIALTY AND FERTILITY CLINIC",
+          "sites": [
+            {
+              "id": "cc25fa1c-c744-4905-9475-ab83b7ac170b",
+              "name": "WOMENS SPECIALTY AND FERTILITY CLINIC SMS",
+              "phone": "2054"
+            },
+            {
+              "id": "5ef80864-9418-4328-ae6b-aefb92e559e5",
+              "name": "WOMENS SPECIALTY AND FERTILITY CLINIC VOICE",
+              "phone": "7700"
+            }
+          ]
+        },
+        {
+          "id": "00fec6c0-577c-4ca1-a39a-1942edf3c277",
+          "name": "CMP Clovis",
+          "sites": [
+            {
+              "id": "cab2062b-01aa-4098-99a1-4e956ce97404",
+              "name": "CMP Clovis SMS",
+              "phone": "2200"
+            }
+          ]
+        },
+        {
+          "id": "89675da9-f313-4c9b-b18e-e52ecaac93ae",
+          "name": "CMP NWMG FP West",
+          "sites": [
+            {
+              "id": "b2428115-08f4-4499-b77d-03865de89651",
+              "name": "CMP NWMG FP West SMS",
+              "phone": "9637"
+            }
+          ]
+        },
+        {
+          "id": "26e64e5a-f6b8-4a5a-9fcc-2f2934037133",
+          "name": "CMP NWMG FP East",
+          "sites": [
+            {
+              "id": "69fa4833-4241-435b-bbe6-fa6c8744d1f9",
+              "name": "CMP NWMG FP East SMS",
+              "phone": "9638"
+            }
+          ]
+        },
+        {
+          "id": "479bbcc8-68f2-4bb6-9116-e0ff09ca07bf",
+          "name": "Simonian Sports Medicine Clinic",
+          "sites": [
+            {
+              "id": "a652bfe3-a02b-45d7-952e-d731413be973",
+              "name": "Simonian Sports Medicine Clinic SMS",
+              "phone": "6783"
+            }
+          ]
+        },
+        {
+          "id": "b4df9631-57da-4b1d-88ee-8d859c4bf5bf",
+          "name": "CMP NWMG Pediatrics",
+          "sites": [
+            {
+              "id": "bc3e08e8-ba35-4ac5-ae0d-1bc86ab0f7fb",
+              "name": "CMP NWMG Pediatrics SMS",
+              "phone": "8494"
+            }
+          ]
+        },
+        {
+          "id": "2cbd3550-b158-490c-86f2-56601c8fc18e",
+          "name": "CCHLS",
+          "sites": [
+            {
+              "id": "c4a55b88-d6f7-4661-a84c-7383b4b7bade",
+              "name": "CCHLS SMS",
+              "phone": "9547"
+            },
+            {
+              "id": "d43723bf-3dba-49f2-a632-a2d8f9d331b9",
+              "name": "CCHLS Voice",
+              "phone": "9990"
+            }
+          ]
+        },
+        {
+          "id": "9ced6cd8-d002-4386-a7ec-dfbc84a8842a",
+          "name": "CMP PWMG FP",
+          "sites": [
+            {
+              "id": "15f9dffa-808b-4524-ad0f-0a5f6869f070",
+              "name": "CMP PWMG FP South SMS",
+              "phone": "9581"
+            },
+            {
+              "id": "99cd0b95-cd3e-4dbd-b1d5-060391625c98",
+              "name": "CMP PWMG FP South VOICE",
+              "phone": "6209"
+            }
+          ]
+        },
+        {
+          "id": "db819376-221d-46b1-ab96-5a4606790a38",
+          "name": "CMP Care Center North",
+          "sites": [
+            {
+              "id": "69b4874f-6f89-44af-a4c1-7467899bf59f",
+              "name": "CMP Care Center North SMS",
+              "phone": "2575"
+            },
+            {
+              "id": "1655c667-9070-42c9-9882-96bf39f1920e",
+              "name": "CMP Care Center North",
+              "phone": "7380"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
