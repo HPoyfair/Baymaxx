@@ -321,6 +321,88 @@ def delete_site(client_id: str, division_id: str, site_id: str) -> bool:
                     return True
     return False
 
+def _move_in_list(items: list, index: int, direction: int) -> bool:
+    """Move items[index] up/down by one; returns True if moved."""
+    new_index = index + direction
+    if index < 0 or index >= len(items):
+        return False
+    if new_index < 0 or new_index >= len(items):
+        return False
+    items[index], items[new_index] = items[new_index], items[index]
+    return True
+
+
+def move_client(client_id: str, direction: int) -> bool:
+    """
+    Move a client up/down in the clients list.
+    direction = -1 (up), +1 (down).
+    """
+    doc = load_clients()
+    clients = doc.get("clients", [])
+    if not isinstance(clients, list):
+        return False
+
+    for i, c in enumerate(clients):
+        if isinstance(c, dict) and c.get("id") == client_id:
+            if _move_in_list(clients, i, direction):
+                save_clients(doc)
+                return True
+            return False
+    return False
+
+
+def move_division(client_id: str, division_id: str, direction: int) -> bool:
+    doc = load_clients()
+    clients = doc.get("clients", [])
+    if not isinstance(clients, list):
+        return False
+
+    for c in clients:
+        if not (isinstance(c, dict) and c.get("id") == client_id):
+            continue
+        divisions = c.get("divisions", [])
+        if not isinstance(divisions, list):
+            return False
+        for i, d in enumerate(divisions):
+            if isinstance(d, dict) and d.get("id") == division_id:
+                if _move_in_list(divisions, i, direction):
+                    save_clients(doc)
+                    return True
+                return False
+    return False
+
+
+def move_site(client_id: str, division_id: str, site_id: str, direction: int) -> bool:
+    doc = load_clients()
+    clients = doc.get("clients", [])
+    if not isinstance(clients, list):
+        return False
+
+    for c in clients:
+        if not (isinstance(c, dict) and c.get("id") == client_id):
+            continue
+        divisions = c.get("divisions", [])
+        if not isinstance(divisions, list):
+            return False
+        for d in divisions:
+            if not (isinstance(d, dict) and d.get("id") == division_id):
+                continue
+            sites = d.get("sites", [])
+            if not isinstance(sites, list):
+                return False
+            for i, s in enumerate(sites):
+                if isinstance(s, dict) and s.get("id") == site_id:
+                    if _move_in_list(sites, i, direction):
+                        save_clients(doc)
+                        return True
+                    return False
+    return False
+
+
+
+
+
+
 
 if __name__ == "__main__":
     _ensure_file()

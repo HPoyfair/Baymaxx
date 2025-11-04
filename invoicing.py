@@ -9,6 +9,7 @@ import os
 import re
 import csv
 from datetime import date, datetime
+import functools
 
 # ---------- internal data paths (app-local) ----------
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -154,17 +155,8 @@ def _normalize_site_key(s: str) -> str:
     u = ' '.join(u.split())
     return u
 
-def _build_priority_phone_map(inv: dict) -> dict[str, str]:
-    phones: dict[str, str] = {}
-    # 1) UI-harvested matches
-    sp = inv.get('site_phones') or {}
-    if isinstance(sp, dict):
-        for name, last4 in sp.items():
-            last4 = str(last4 or '').strip()
-            if last4.isdigit() and len(last4) == 4:
-                phones[_normalize_site_key(name)] = last4
 
-    # 2) clients.json (optional)
+   
     load_clients = globals().get('_load_clients_doc') or globals().get('load_clients_doc')
     if callable(load_clients):
         try:
@@ -179,11 +171,6 @@ def _build_priority_phone_map(inv: dict) -> dict[str, str]:
                     if nm and ph.isdigit() and len(ph) == 4:
                         phones.setdefault(_normalize_site_key(nm), ph)
     return phones
-
-def _lookup_last4(phones: dict[str, str], desc: str) -> str | None:
-    if not desc:
-        return None
-    return phones.get(_normalize_site_key(desc))
 
 
 
@@ -821,17 +808,6 @@ if '_recompute_totals' not in globals() and 'recompute_totals' in globals():
 
 # ------------------ phone-resolution helpers ------------------
 
-def _normalize_site_key(s: str) -> str:
-    """Uppercase, trim VOICE/SMS suffix, and take left side of en dash."""
-    u = (s or '').upper().strip()
-    for suf in (' VOICE', ' SMS'):
-        if u.endswith(suf):
-            u = u[:-len(suf)].strip()
-    if '–' in u:
-        u = u.split('–', 1)[0].strip()
-    # collapse internal whitespace
-    u = ' '.join(u.split())
-    return u
 
 def _build_priority_phone_map(inv: dict) -> dict[str, str]:
     """
@@ -1029,117 +1005,13 @@ def aggregate_voice_items_from_csvs(files_with_sites, year=None, month=None):
         label = site_name or _Path(csv_path).stem      # <--- use filename if no site
         by_site[label] = by_site.get(label, 0) + int(qty)
 
-    items: list[dict] = []
-    for site_key, qty in sorted(by_site.items(), key=lambda kv: (kv[0] or "",)):
+    items: list[dict[str, Any]] = []
+    for site_key, qty in _ordered_site_items(by_site):
         items.append(build_voice_line_item(site_key or None, qty))
     return items
 
 
 
-def _normalize_site_key(name: str) -> str:
-    import re as _re
-    if not name: return ""
-    u = (name or "").upper().strip()
-    u = u.replace("—", "-").replace("–", "-")
-    u = _re.sub(r"\s+", " ", u)
-    return u
-
-def _build_priority_phone_map(inv: dict) -> dict[str,str]:
-    phones: dict[str,str] = {}
-    for k, v in (inv.get("site_phones") or {}).items():
-        sv = str(v)
-        if sv.isdigit() and len(sv) == 4:
-            phones[_normalize_site_key(k)] = sv
-    try:
-        import json
-        here = Path(__file__).resolve().parent
-        cpath = here / "data" / "clients.json"
-        if cpath.exists():
-            data = json.loads(cpath.read_text(encoding="utf-8"))
-            for c in data.get("clients", []):
-                for d in (c.get("divisions") or []):
-                    for s in (d.get("sites") or []):
-                        n = (s.get("name") or "").strip()
-                        ph = (s.get("phone") or "").strip()
-                        if n and ph.isdigit() and len(ph) == 4:
-                            phones.setdefault(_normalize_site_key(n), ph)
-    except Exception:
-        pass
-    return phones
-
-def _lookup_last4(phones: dict[str,str], desc: str) -> str | None:
-    if not desc: return None
-    key = _normalize_site_key(desc)
-    # direct
-    if key in phones:
-        return phones[key]
-    # try trimming VOICE/SMS
-    for suf in (" VOICE"," SMS"):
-        if key.endswith(suf):
-            k = key[:-len(suf)].strip()
-            if k in phones:
-                return phones[k]
-            key = k
-            break
-    # left side of dash
-    if " - " in key:
-        k = key.split(" - ",1)[0].strip()
-        if k in phones:
-            return phones[k]
-    return None
-
-
-def _normalize_site_key(name: str) -> str:
-    import re as _re
-    if not name: return ""
-    u = (name or "").upper().strip()
-    u = u.replace("—", "-").replace("–", "-")
-    u = _re.sub(r"\s+", " ", u)
-    return u
-
-def _build_priority_phone_map(inv: dict) -> dict[str,str]:
-    phones: dict[str,str] = {}
-    for k, v in (inv.get("site_phones") or {}).items():
-        sv = str(v)
-        if sv.isdigit() and len(sv) == 4:
-            phones[_normalize_site_key(k)] = sv
-    try:
-        import json
-        here = Path(__file__).resolve().parent
-        cpath = here / "data" / "clients.json"
-        if cpath.exists():
-            data = json.loads(cpath.read_text(encoding="utf-8"))
-            for c in data.get("clients", []):
-                for d in (c.get("divisions") or []):
-                    for s in (d.get("sites") or []):
-                        n = (s.get("name") or "").strip()
-                        ph = (s.get("phone") or "").strip()
-                        if n and ph.isdigit() and len(ph) == 4:
-                            phones.setdefault(_normalize_site_key(n), ph)
-    except Exception:
-        pass
-    return phones
-
-def _lookup_last4(phones: dict[str,str], desc: str) -> str | None:
-    if not desc: return None
-    key = _normalize_site_key(desc)
-    # direct
-    if key in phones:
-        return phones[key]
-    # try trimming VOICE/SMS
-    for suf in (" VOICE"," SMS"):
-        if key.endswith(suf):
-            k = key[:-len(suf)].strip()
-            if k in phones:
-                return phones[k]
-            key = k
-            break
-    # left side of dash
-    if " - " in key:
-        k = key.split(" - ",1)[0].strip()
-        if k in phones:
-            return phones[k]
-    return None
 def add_voice_items_to_invoice(inv: Dict[str, Any],
                                files_with_sites: list[tuple[str | Path, str | None]],
                                year: int | None = None,
@@ -1327,15 +1199,63 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     return pdf_path
 
 
+def _iter_sites_in_clients_order(clients_doc: dict):
+    """
+    Yield site names in the exact order they appear in clients.json:
+    client -> division -> sites[].
+    """
+    for client in (clients_doc.get("clients") or []):
+        for div in (client.get("divisions") or []):
+            for site in (div.get("sites") or []):
+                name = (site.get("name") or "").strip()
+                if name:
+                    yield name
+
+
+def _ordered_site_items(by_site: dict[str, int]) -> list[tuple[str, int]]:
+    """
+    Take a mapping {site_name: qty} and return a list of (site_name, qty)
+    in clients.json order. Any sites that *aren't* in clients.json go
+    at the end, alphabetically.
+    """
+    clients_doc = _load_clients_doc()
+
+    ordered: list[tuple[str, int]] = []
+    used: set[str] = set()
+
+    # 1) sites that exist in clients.json, in that order
+    for site_name in _iter_sites_in_clients_order(clients_doc):
+        if site_name in by_site:
+            ordered.append((site_name, by_site[site_name]))
+            used.add(site_name)
+
+    # 2) leftovers – sites that weren't in clients.json
+    leftovers = sorted(k for k in by_site.keys() if k not in used)
+    for site_name in leftovers:
+        ordered.append((site_name, by_site[site_name]))
+
+    return ordered
+
+
 # ---------- Excel template → PDF export (Windows, requires Excel) ----------
-def _load_clients_doc(path: str | Path | None) -> dict:
+@functools.lru_cache(maxsize=1)
+def _load_clients_doc() -> dict:
+    """
+    Load data/clients.json once and cache it.
+    """
     try:
-        p = Path(path) if path else DATA_DIR / "clients.json"
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
+        here = Path(__file__).resolve().parent
+        clients_path = here / "data" / "clients.json"
+        with clients_path.open("r", encoding="utf-8") as f:
+            doc = json.load(f)
+        return doc or {}
+    except FileNotFoundError:
+        # No clients.json – just fall back to alphabetical order later
+        return {}
+    except Exception as e:
+        # Don't crash invoicing if clients.json is weird
+        print("WARNING: could not load clients.json for site ordering:", e)
+        return {}
 
 def _find_client_address(clients_doc: dict, name_snapshot: str | None) -> list[str]:
     """Return up to 3 lines for the client's billing block (name + address)."""
@@ -1715,16 +1635,14 @@ def add_message_items_to_invoice(
     """
     billed = _sum_billed_units_by_site(messages_with_sites, year, month)
 
-    for site, qty in sorted(billed.items()):
+    for site, qty in _ordered_site_items(billed):
         if qty <= 0:
             continue
         base = (site or "").strip()
-        # 🔹 avoid double "SMS SMS"
         if base.upper().endswith("SMS"):
             desc = base
         else:
             desc = f"{base} SMS" if base else "SMS"
-
         try:
             _add_item(inv, desc, qty, unit_price)
         except NameError:
@@ -1733,6 +1651,7 @@ def add_message_items_to_invoice(
                 "qty": qty,
                 "unit_price": unit_price,
             })
+
 
     # Recompute totals in-memory (Excel still computes H=F*G)
     try:

@@ -73,6 +73,16 @@ if not hasattr(inv, "finalize_with_template"):
 
 # ---- Finalize shim: uses invoicing.finalize_with_template if present,
 # ---- else reconstructs the same pipeline with existing functions.
+
+def _move_in_list(seq, old_index, new_index):
+    """Move seq[old_index] to new_index in-place, if both indexes are valid."""
+    if not (0 <= old_index < len(seq)):
+        return
+    if not (0 <= new_index < len(seq)):
+        return
+    item = seq.pop(old_index)
+    seq.insert(new_index, item)
+
 def _finalize_shim(inv_module, inv_obj, template_path):
     fn = getattr(inv_module, "finalize_with_template", None)
     if fn:
@@ -226,7 +236,7 @@ class ClientsManager(tk.Toplevel):
     def __init__(self, parent: tk.Tk):
         super().__init__(parent)
         self.title("Clients")
-        self.geometry("720x420")
+        self.geometry("720x440")
         self.transient(parent)
         self.grab_set()
         self.columnconfigure(0, weight=1)
@@ -248,14 +258,16 @@ class ClientsManager(tk.Toplevel):
 
         btns = ttk.Frame(self, padding=(12, 6))
         btns.grid(row=1, column=0, columnspan=2, sticky="ew")
-        for i in range(5):
+        for i in range(7):
             btns.columnconfigure(i, weight=1)
 
         ttk.Button(btns, text="Add", command=self.add_client).grid(row=0, column=0, sticky="ew", padx=4)
         ttk.Button(btns, text="Edit", command=self.edit_client).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(btns, text="Delete", command=self.delete_client).grid(row=0, column=2, sticky="ew", padx=4)
         ttk.Button(btns, text="Divisions…", command=self.open_divisions).grid(row=0, column=3, sticky="ew", padx=4)
-        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=4, sticky="ew", padx=4)
+        ttk.Button(btns, text="Move Up", command=lambda: self.move_client(-1)).grid(row=0, column=4, sticky="ew", padx=4)
+        ttk.Button(btns, text="Move Down", command=lambda: self.move_client(1)).grid(row=0, column=5, sticky="ew", padx=4)
+        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=6, sticky="ew", padx=4)
 
         self.tree.bind("<Double-1>", lambda e: self.edit_client())
         self.refresh()
@@ -267,12 +279,17 @@ class ClientsManager(tk.Toplevel):
     def refresh(self):
         for iid in self.tree.get_children():
             self.tree.delete(iid)
-        for c in clients.list_clients():
-            name = c.get("name", "")
-            address = c.get("address", "")
-            divs = c.get("divisions", [])
+        for cinfo in clients.list_clients():
+            name = cinfo.get("name", "")
+            address = cinfo.get("address", "")
+            divs = cinfo.get("divisions", [])
             count = len(divs) if isinstance(divs, list) else 0
-            self.tree.insert("", tk.END, iid=c.get("id", ""), values=(name, address, count))
+            self.tree.insert(
+                "",
+                tk.END,
+                iid=cinfo.get("id", ""),
+                values=(name, address, count),
+            )
 
     def _client_dialog(self, title: str, init_name: str = "", init_address: str = "") -> tuple[str | None, str]:
         dlg = tk.Toplevel(self)
@@ -294,7 +311,11 @@ class ClientsManager(tk.Toplevel):
         btns = ttk.Frame(dlg)
         btns.grid(row=2, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
         ttk.Button(btns, text="OK", command=dlg.destroy).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Cancel", command=lambda: (name_var.set("__CANCEL__"), dlg.destroy())).grid(row=0, column=1)
+        ttk.Button(
+            btns,
+            text="Cancel",
+            command=lambda: (name_var.set("__CANCEL__"), dlg.destroy()),
+        ).grid(row=0, column=1)
 
         name_ent.focus_set()
         dlg.wait_window(dlg)
@@ -317,11 +338,15 @@ class ClientsManager(tk.Toplevel):
         if not cid:
             messagebox.showinfo("Edit Client", "Select a client first.")
             return
-        c = clients.find_client(cid)
-        if not c:
+        cinfo = clients.find_client(cid)
+        if not cinfo:
             messagebox.showerror("Edit Client", "Client not found.")
             return
-        name, addr = self._client_dialog("Edit Client", init_name=c.get("name", ""), init_address=c.get("address", ""))
+        name, addr = self._client_dialog(
+            "Edit Client",
+            init_name=cinfo.get("name", ""),
+            init_address=cinfo.get("address", ""),
+        )
         if name is None:
             return
         if not clients.update_client(cid, name=name, address=addr):
@@ -347,11 +372,41 @@ class ClientsManager(tk.Toplevel):
         if not cid:
             messagebox.showinfo("Divisions", "Select a client first.")
             return
-        c = clients.find_client(cid)
-        if not c:
+        cinfo = clients.find_client(cid)
+        if not cinfo:
             messagebox.showerror("Divisions", "Client not found.")
             return
-        DivisionsManager(self, client_id=cid, client_name=c.get("name", "(unnamed)"))
+        DivisionsManager(self, client_id=cid, client_name=cinfo.get("name", "(unnamed)"))
+
+    def move_client(self, direction: int):
+        """
+        direction = -1 for up, +1 for down
+        Reorders top-level clients in clients.json.
+        """
+        cid = self.selected_id()
+        if not cid:
+            messagebox.showinfo("Move Client", "Select a client first.")
+            return
+
+        doc = clients.load_clients()
+        clist = doc.get("clients", [])
+        if not isinstance(clist, list):
+            return
+
+        idx = next((i for i, c in enumerate(clist) if c.get("id") == cid), None)
+        if idx is None:
+            return
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(clist):
+            return  # already at top/bottom
+
+        obj = clist.pop(idx)
+        clist.insert(new_idx, obj)
+        clients.save_clients(doc)
+
+        self.refresh()
+        self.tree.selection_set(cid)
+        self.tree.see(cid)
 
 
 # ---------------- Divisions Manager (middle) ----------------
@@ -360,7 +415,7 @@ class DivisionsManager(tk.Toplevel):
         super().__init__(parent)
         self.client_id = client_id
         self.title(f"Divisions — {client_name}")
-        self.geometry("640x400")
+        self.geometry("640x420")
         self.transient(parent)
         self.grab_set()
         self.columnconfigure(0, weight=1)
@@ -380,14 +435,16 @@ class DivisionsManager(tk.Toplevel):
 
         btns = ttk.Frame(self, padding=(12, 6))
         btns.grid(row=1, column=0, columnspan=2, sticky="ew")
-        for i in range(5): 
+        for i in range(7):
             btns.columnconfigure(i, weight=1)
 
         ttk.Button(btns, text="Add", command=self.add_division).grid(row=0, column=0, sticky="ew", padx=4)
         ttk.Button(btns, text="Edit", command=self.edit_division).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(btns, text="Delete", command=self.delete_division).grid(row=0, column=2, sticky="ew", padx=4)
         ttk.Button(btns, text="Sites…", command=self.open_sites).grid(row=0, column=3, sticky="ew", padx=4)
-        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=4, sticky="ew", padx=4)
+        ttk.Button(btns, text="Move Up", command=lambda: self.move_division(-1)).grid(row=0, column=4, sticky="ew", padx=4)
+        ttk.Button(btns, text="Move Down", command=lambda: self.move_division(1)).grid(row=0, column=5, sticky="ew", padx=4)
+        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=6, sticky="ew", padx=4)
 
         self.tree.bind("<Double-1>", lambda e: self.edit_division())
         self.refresh()
@@ -426,7 +483,11 @@ class DivisionsManager(tk.Toplevel):
         btns = ttk.Frame(dlg)
         btns.grid(row=1, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
         ttk.Button(btns, text="OK", command=dlg.destroy).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Cancel", command=lambda: (var.set("__CANCEL__"), dlg.destroy())).grid(row=0, column=1)
+        ttk.Button(
+            btns,
+            text="Cancel",
+            command=lambda: (var.set("__CANCEL__"), dlg.destroy()),
+        ).grid(row=0, column=1)
 
         ent.focus_set()
         dlg.wait_window(dlg)
@@ -435,9 +496,10 @@ class DivisionsManager(tk.Toplevel):
             return None
         return name
 
+    # actions
     def add_division(self):
         name = self._name_dialog("Add Division")
-        if name is None:
+        if not name:
             return
         if not clients.add_division(self.client_id, name):
             messagebox.showerror("Add Division", "Add failed.")
@@ -461,7 +523,7 @@ class DivisionsManager(tk.Toplevel):
             messagebox.showerror("Edit Division", "Division not found.")
             return
         name = self._name_dialog("Edit Division", init=cur.get("name", ""))
-        if name is None:
+        if not name:
             return
         if not clients.update_division(self.client_id, did, name=name):
             messagebox.showerror("Edit Division", "Update failed.")
@@ -476,9 +538,10 @@ class DivisionsManager(tk.Toplevel):
         nm = item["values"][0] if item and item.get("values") else "(unnamed)"
         if not messagebox.askyesno("Delete Division", f"Delete '{nm}'?"):
             return
-        if not clients.delete_division(self.client_id, did):
+        if clients.delete_division(self.client_id, did):
+            self.refresh()
+        else:
             messagebox.showerror("Delete Division", "Delete failed.")
-        self.refresh()
 
     def open_sites(self):
         did = self.selected_id()
@@ -489,12 +552,51 @@ class DivisionsManager(tk.Toplevel):
         if not c:
             messagebox.showerror("Sites", "Client not found.")
             return
-        dname = "(unnamed)"
+        div = None
         for d in c.get("divisions", []):
             if isinstance(d, dict) and d.get("id") == did:
-                dname = d.get("name", "(unnamed)")
+                div = d
                 break
-        SitesManager(self, client_id=self.client_id, division_id=did, division_name=dname)
+        if not div:
+            messagebox.showerror("Sites", "Division not found.")
+            return
+        SitesManager(self, self.client_id, did, division_name=div.get("name", "(unnamed)"))
+
+    def move_division(self, direction: int):
+        """
+        direction = -1 for up, +1 for down
+        Reorders this client's divisions in clients.json.
+        """
+        did = self.selected_id()
+        if not did:
+            messagebox.showinfo("Move Division", "Select a division first.")
+            return
+
+        doc = clients.load_clients()
+        changed = False
+
+        for c in doc.get("clients", []):
+            if c.get("id") != self.client_id:
+                continue
+            divisions = c.get("divisions", [])
+            if not isinstance(divisions, list):
+                return
+            idx = next((i for i, d in enumerate(divisions) if d.get("id") == did), None)
+            if idx is None:
+                return
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(divisions):
+                return
+            div_obj = divisions.pop(idx)
+            divisions.insert(new_idx, div_obj)
+            changed = True
+            break
+
+        if changed:
+            clients.save_clients(doc)
+            self.refresh()
+            self.tree.selection_set(did)
+            self.tree.see(did)
 
 
 # ---------------- Sites Manager (bottom – has phone) ----------------
@@ -504,7 +606,7 @@ class SitesManager(tk.Toplevel):
         self.client_id = client_id
         self.division_id = division_id
         self.title(f"Sites — {division_name}")
-        self.geometry("620x380")
+        self.geometry("620x420")
         self.transient(parent)
         self.grab_set()
         self.columnconfigure(0, weight=1)
@@ -524,13 +626,15 @@ class SitesManager(tk.Toplevel):
 
         btns = ttk.Frame(self, padding=(12, 6))
         btns.grid(row=1, column=0, columnspan=2, sticky="ew")
-        for i in range(4):
+        for i in range(6):
             btns.columnconfigure(i, weight=1)
 
         ttk.Button(btns, text="Add", command=self.add_site).grid(row=0, column=0, sticky="ew", padx=4)
         ttk.Button(btns, text="Edit", command=self.edit_site).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(btns, text="Delete", command=self.delete_site).grid(row=0, column=2, sticky="ew", padx=4)
-        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Button(btns, text="Move Up", command=lambda: self.move_site(-1)).grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Button(btns, text="Move Down", command=lambda: self.move_site(1)).grid(row=0, column=4, sticky="ew", padx=4)
+        ttk.Button(btns, text="Close", command=self.destroy).grid(row=0, column=5, sticky="ew", padx=4)
 
         self.tree.bind("<Double-1>", lambda e: self.edit_site())
         self.refresh()
@@ -552,7 +656,12 @@ class SitesManager(tk.Toplevel):
             if not isinstance(sites, list):
                 return
             for s in sites:
-                self.tree.insert("", tk.END, iid=s.get("id", ""), values=(s.get("name", ""), s.get("phone", "")))
+                self.tree.insert(
+                    "",
+                    tk.END,
+                    iid=s.get("id", ""),
+                    values=(s.get("name", ""), s.get("phone", "")),
+                )
 
     def _site_dialog(self, title: str, init_name: str = "", init_phone: str = "") -> tuple[str | None, str]:
         dlg = tk.Toplevel(self)
@@ -574,8 +683,11 @@ class SitesManager(tk.Toplevel):
         btns = ttk.Frame(dlg)
         btns.grid(row=2, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
         ttk.Button(btns, text="OK", command=dlg.destroy).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Cancel",
-                   command=lambda: (name_var.set("__CANCEL__"), dlg.destroy())).grid(row=0, column=1)
+        ttk.Button(
+            btns,
+            text="Cancel",
+            command=lambda: (name_var.set("__CANCEL__"), dlg.destroy()),
+        ).grid(row=0, column=1)
 
         name_ent.focus_set()
         dlg.wait_window(dlg)
@@ -615,7 +727,11 @@ class SitesManager(tk.Toplevel):
         if not cur:
             messagebox.showerror("Edit Site", "Site not found.")
             return
-        name, phone = self._site_dialog("Edit Site", init_name=cur.get("name", ""), init_phone=cur.get("phone", ""))
+        name, phone = self._site_dialog(
+            "Edit Site",
+            init_name=cur.get("name", ""),
+            init_phone=cur.get("phone", ""),
+        )
         if name is None:
             return
         if not clients.update_site(self.client_id, self.division_id, sid, name=name, phone=phone):
@@ -633,7 +749,49 @@ class SitesManager(tk.Toplevel):
             return
         if not clients.delete_site(self.client_id, self.division_id, sid):
             messagebox.showerror("Delete Site", "Delete failed.")
-        self.refresh()
+        else:
+            self.refresh()
+
+    def move_site(self, direction: int):
+        """
+        direction = -1 for up, +1 for down
+        Reorders sites list for this division in clients.json.
+        """
+        sid = self.selected_id()
+        if not sid:
+            messagebox.showinfo("Move Site", "Select a site first.")
+            return
+
+        doc = clients.load_clients()
+        changed = False
+
+        for c in doc.get("clients", []):
+            if c.get("id") != self.client_id:
+                continue
+            for d in c.get("divisions", []):
+                if d.get("id") != self.division_id:
+                    continue
+                sites = d.get("sites", [])
+                if not isinstance(sites, list):
+                    return
+                idx = next((i for i, s in enumerate(sites) if s.get("id") == sid), None)
+                if idx is None:
+                    return
+                new_idx = idx + direction
+                if new_idx < 0 or new_idx >= len(sites):
+                    return  # can't move further
+                site_obj = sites.pop(idx)
+                sites.insert(new_idx, site_obj)
+                changed = True
+                break
+
+        if changed:
+            clients.save_clients(doc)
+            self.refresh()
+            # reselect moved row
+            self.tree.selection_set(sid)
+            self.tree.see(sid)
+
 
 
 # ---------------- Right-pane views ----------------
