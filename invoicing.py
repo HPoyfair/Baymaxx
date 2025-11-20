@@ -1375,6 +1375,220 @@ def decorate_with_last4_kind(inv: dict, desc: str) -> str:
     # couldn't resolve a phone – return undecorated base text
     return base
 
+# ---------- QuickBooks "master" invoicing.csv export ----------
+
+_QB_HEADER = [
+    "*InvoiceNo",
+    "*Customer",
+    "*InvoiceDate",
+    "*DueDate",
+    "Terms",
+    "Location",
+    "Memo",
+    "Item(Product/Service)",
+    "ItemDescription",
+    "ItemQuantity",
+    "ItemRate",
+    "*ItemAmount",
+    "Service Date",
+]
+
+
+def _last_day_of_month(year: int, month: int) -> date:
+    """Return last day of (year, month)."""
+    import calendar
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, last)
+
+
+def _fmt_us_date(d: date) -> str:
+    """QuickBooks-style m/d/yyyy."""
+    return f"{d.month}/{d.day}/{d.year}"
+
+
+def _build_site_division_index_for_client(
+    clients_doc: dict,
+    client_name: str | None,
+) -> tuple[list[str], dict[str, tuple[str, int, int]]]:
+    """
+    For the given client name, build:
+      - ordered list of division names
+      - map: normalized_site_key -> (division_name, div_index, site_index)
+    """
+    if not client_name:
+        return ([], {})
+
+    client_name = client_name.strip()
+    target = None
+    for c in (clients_doc.get("clients") or []):
+        if (c.get("name") or "").strip() == client_name:
+            target = c
+            break
+    if not target:
+        return ([], {})
+
+    divisions = target.get("divisions") or []
+    div_order: list[str] = []
+    site_map: dict[str, tuple[str, int, int]] = {}
+
+    for di, d in enumerate(divisions):
+        dname = (d.get("name") or "").strip()
+        if not dname:
+            continue
+        div_order.append(dname)
+        for si, s in enumerate(d.get("sites") or []):
+            sname = (s.get("name") or "").strip()
+            if not sname:
+                continue
+            key = _normalize_site_key(sname)
+            if key:
+                site_map[key] = (dname, di, si)
+
+    return (div_order, site_map)
+
+
+def export_quickbooks_invoicing_csv(
+    inv: Dict[str, Any],
+    out_dir: str | Path | None = None,
+    csv_name: str = "invoicing.csv",
+) -> Path:
+    """
+    Build a QuickBooks-compatible 'invoicing.csv' file:
+
+    * One invoice per DIVISION.
+    * Invoice number starts from inv['starting_invoice_number'].
+    * Invoice number only increments when a NEW division is encountered.
+    * Within a division, all rows share the same invoice number.
+
+    The header row matches your sample exactly.
+    """
+
+    # ----- basics from the invoice dict -----
+    period = inv.get("period") or {}
+    year = int(period.get("year", 0) or 0)
+    month = int(period.get("month", 0) or 0)
+    if not year or not month:
+        raise ValueError("Invoice 'period' is missing year/month.")
+
+    client_name = inv.get("client_name_snapshot") or ""
+    start_no = inv.get("starting_invoice_number")
+    try:
+        invoice_no = int(start_no)
+    except Exception:
+        invoice_no = 1
+
+    service_date = _last_day_of_month(year, month)
+    invoice_date = service_date          # simple rule; can be changed later
+    due_date = service_date              # same as invoice date for now
+
+    inv_date_s = _fmt_us_date(invoice_date)
+    due_date_s = _fmt_us_date(due_date)
+    service_date_s = _fmt_us_date(service_date)
+
+    # ----- map sites -> divisions, in client/division/site order -----
+    clients_doc = _load_clients_doc()
+    div_order, site_map = _build_site_division_index_for_client(
+        clients_doc, client_name
+    )
+
+    # Group line items by division, preserving site order
+    by_div: dict[str, list[tuple[int, int, Dict[str, Any]]]] = {}
+    leftovers: list[Dict[str, Any]] = []
+
+    for li in inv.get("line_items", []):
+        desc = str(li.get("description", "") or "")
+        key = _normalize_site_key(desc)
+        info = site_map.get(key)
+        if not info:
+            leftovers.append(li)
+            continue
+        dname, di, si = info
+        by_div.setdefault(dname, []).append((di, si, li))
+
+    # ----- assemble rows -----
+    rows: list[list[str]] = []
+
+    def _add_invoice_for_division(
+        div_name: str,
+        items: list[tuple[int, int, Dict[str, Any]]],
+        current_invoice_no: int,
+    ) -> int:
+        """Append rows for a single division and return next invoice number."""
+        if not items:
+            return current_invoice_no
+
+        # sort by site index within that division
+        items = sorted(items, key=lambda t: t[1])
+
+        first = True
+        for _, _, li in items:
+            qty_val = li.get("qty", 0)
+            try:
+                qty = str(int(round(float(qty_val))))
+            except Exception:
+                qty = str(qty_val)
+
+            rate = float(li.get("unit_price", 0) or 0.0)
+            amt = float(li.get("amount", 0) or 0.0)
+
+            row: list[str] = []
+            # InvoiceNo always present on every row
+            row.append(str(current_invoice_no))
+
+            if first:
+                # First row for this invoice: fill invoice-level fields
+                row.extend([
+                    client_name,         # *Customer
+                    inv_date_s,          # *InvoiceDate
+                    due_date_s,          # *DueDate
+                    "Due on Receipt",    # Terms
+                    "",                  # Location
+                    "",                  # Memo
+                ])
+                first = False
+            else:
+                # Subsequent rows: blank invoice-level fields
+                row.extend(["", "", "", "", "", ""])
+
+            row.extend([
+                "Services",                        # Item(Product/Service)
+                str(li.get("description", "")),    # ItemDescription
+                qty,                               # ItemQuantity
+                f"{rate:.2f}",                     # ItemRate
+                f"{amt:.2f}",                      # *ItemAmount
+                service_date_s,                    # Service Date
+            ])
+            rows.append(row)
+
+        return current_invoice_no + 1
+
+    # 1) Divisions in clients.json order
+    for dname in div_order:
+        items = by_div.get(dname)
+        if not items:
+            continue
+        invoice_no = _add_invoice_for_division(dname, items, invoice_no)
+
+    # 2) Any items we couldn't map to a division: each becomes its own invoice
+    for li in leftovers:
+        invoice_no = _add_invoice_for_division(
+            "(Unassigned)", [(0, 0, li)], invoice_no
+        )
+
+    # ----- write CSV -----
+    if out_dir is None:
+        out_dir = invoice_output_dir()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = out_dir / csv_name
+
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(_QB_HEADER)
+        w.writerows(rows)
+
+    return csv_path
 
 
 # === END: exporter decoration helpers ===
@@ -1443,6 +1657,12 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
             ws["H8"].value = "Due on Receipt"
     except Exception:
         pass
+
+
+
+
+
+
 
     # Bill-To lines (A8..A10)
     def _bill_to_lines() -> List[str]:

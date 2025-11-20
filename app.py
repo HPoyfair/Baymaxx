@@ -1346,71 +1346,37 @@ def infer_parent_billto_from_clients(inv_obj: dict, clients_doc: dict) -> None:
             client["name"], client["address"], client["contact"] = hit
             break
 
-def _finalize_shim(inv_obj: dict, template_path: str) -> dict:
-    """
-    Save JSON, export CSV, then try to fill Excel template (and PDF if Windows+Excel),
-    else fall back to ReportLab PDF. Returns paths dict with any of: json,csv,xlsm,xlsx,pdf.
-    """
-    paths = {}
-    # 1) JSON (internal)
-    try:
-        p = inv.save_invoice(inv_obj)
-        paths["json"] = str(p)
-    except Exception:
-        pass
+def _finalize_shim(inv_module, inv_obj, template_path: str | None):
+    inv = inv_module
 
-    # 2) CSV
+    # 3) PDF exports & base CSV export
     try:
-        p = inv.export_invoice_csv(inv_obj)
-        paths["csv"] = str(p)
+        csv_path = inv.export_invoice_csv(inv_obj)
     except Exception:
-        pass
+        csv_path = None
 
-    # 3) Excel template (+ PDF on Windows via pywin32) – support v3 or legacy name
+    # NEW: QuickBooks master "invoicing.csv"
     try:
-        if hasattr(inv, "export_invoice_with_excel_template_v3"):
-            out = inv.export_invoice_with_excel_template_v3(
-                inv_obj,
-                template_path=str(template_path),
-                out_dir=None,
-                export_pdf=True
-            )
-            # out may be a dict or tuple; normalize:
-            if isinstance(out, dict):
-                paths.update({k: str(v) for k, v in out.items() if v})
-            else:
-                # (xlsm_path, pdf_path) style
-                if len(out) >= 1 and out[0]: paths["xlsm"] = str(out[0])
-                if len(out) >= 2 and out[1]: paths["pdf"]  = str(out[1])
-        elif hasattr(inv, "export_invoice_with_excel_template"):
-            out = inv.export_invoice_with_excel_template(
-                inv_obj,
-                str(template_path)
-            )
-            if isinstance(out, dict):
-                paths.update({k: str(v) for k, v in out.items() if v})
-            else:
-                if len(out) >= 1 and out[0]: paths["xlsm"] = str(out[0])
-                if len(out) >= 2 and out[1]: paths["pdf"]  = str(out[1])
-        elif hasattr(inv, "export_invoice_pdf_via_template"):
-            # Some versions only return a PDF via template
-            p = inv.export_invoice_pdf_via_template(inv_obj, str(template_path))
-            if p:
-                paths["pdf"] = str(p)
+        qb_path = inv.export_quickbooks_invoicing_csv(inv_obj)
     except Exception:
-        # Fall through to ReportLab PDF
-        pass
+        qb_path = None
 
-    # 4) Fallback PDF (simple layout)
-    if "pdf" not in paths:
+    pdf_path = None
+    if template_path and os.name == "nt":
         try:
-            p = inv.export_invoice_pdf(inv_obj)
-            if p:
-                paths["pdf"] = str(p)
+            pdf_path = inv.export_invoice_pdf_via_template(inv_obj, template_path)
         except Exception:
-            pass
+            pdf_path = None
 
-    return paths
+    if not pdf_path:
+        try:
+            pdf_path = inv.export_invoice_pdf(inv_obj)
+        except Exception:
+            pdf_path = None
+
+    # We don’t *use* qb_path in the UI yet, but the file is created alongside everything else.
+    return pdf_path, csv_path
+
 
 
 def main():
