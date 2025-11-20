@@ -45,63 +45,6 @@ CELL_MAP = {
 }
 
 
-# --- Fallback shim: if invoicing.finalize_with_template is missing, use classic pipeline ---
-if not hasattr(inv, "finalize_with_template"):
-    def _finalize_shim(inv_obj, template_path):
-        internal = inv.save_invoice(inv_obj)
-
-        # 1) Base invoice CSV
-        try:
-            csv_path = inv.export_invoice_csv(inv_obj)
-        except Exception:
-            csv_path = None
-
-        # 2) QuickBooks master "invoicing.csv"
-        qb_path = None
-        try:
-            from pathlib import Path
-            out_dir = None
-            if csv_path:
-                # Put invoicing.csv right next to the base invoice CSV
-                out_dir = Path(csv_path).parent
-            qb_path = inv.export_quickbooks_invoicing_csv(inv_obj, out_dir=out_dir)
-        except Exception as e:
-            # Optional: log instead of silently failing
-            import traceback, pathlib
-            log_path = pathlib.Path.home() / "Baymaxx_invoicing_error.log"
-            log_path.write_text(
-                "Error exporting QuickBooks invoicing.csv:\n"
-                f"{e}\n\n{traceback.format_exc()}",
-                encoding="utf-8",
-            )
-            qb_path = None
-
-        # 3) PDF exports
-        pdf_path = None
-        # Try Excel template -> PDF (Windows with Excel)
-        if template_path and os.name == "nt":
-            try:
-                pdf_path = inv.export_invoice_pdf_via_template(inv_obj, template_path)
-            except Exception:
-                pdf_path = None
-
-        if not pdf_path:
-            try:
-                pdf_path = inv.export_invoice_pdf(inv_obj)
-            except Exception:
-                pdf_path = None
-
-        return {
-            "json": str(internal),
-            "csv": str(csv_path) if csv_path else None,
-            "xlsm": None,
-            "pdf": str(pdf_path) if pdf_path else None,
-            "qb": str(qb_path) if qb_path else None,
-        }
-
-inv.finalize_with_template = _finalize_shim  # patches module at runtime
-
-
 # ---- Finalize shim: uses invoicing.finalize_with_template if present,
 # ---- else reconstructs the same pipeline with existing functions.
 
@@ -1415,87 +1358,73 @@ def infer_parent_billto_from_clients(inv_obj: dict, clients_doc: dict) -> None:
             client["name"], client["address"], client["contact"] = hit
             break
 
-def _finalize_shim(inv_module, inv_obj, template_path):
-    """
-    Finalize an invoice:
-      - optional custom finalize_with_template()
-      - save JSON
-      - export base invoice CSV
-      - export QuickBooks master invoicing.csv
-      - export PDF (via template if available, else generic)
-      - try to detect an .xlsm file if the template flow generates one
-    Returns a dict of paths.
-    """
-    # If the invoicing module has its own finalize hook, delegate to it
-    fn = getattr(inv_module, "finalize_with_template", None)
-    if fn:
-        return fn(inv_obj, template_path)
+# --- Fallback shim: if invoicing.finalize_with_template is missing, use classic pipeline ---
+# --- Fallback shim: if invoicing.finalize_with_template is missing, use classic pipeline ---
+if not hasattr(inv, "finalize_with_template"):
+    def _finalize_shim(inv_obj, template_path):
+        """
+        Finalize an invoice WITHOUT creating a combined PDF
+        and WITHOUT creating the extra per-invoice CSV.
 
-    # 1) Save JSON
-    json_path = inv_module.save_invoice(inv_obj)
+        - Save JSON
+        - Pick dated output folder (Monthly MM-DD-YYYY, etc.)
+        - Export QuickBooks master invoicing.csv into that folder
+        - Export one PDF per division into that folder
+        """
+        _ = template_path  # keep signature; actual use is inside export_division_pdfs
 
-    # 2) Base invoice CSV
-    try:
-        csv_path = inv_module.export_invoice_csv(inv_obj)
-    except Exception:
-        csv_path = None
+        # 1) Save invoice JSON
+        internal = inv.save_invoice(inv_obj)
 
-    # 3) QuickBooks master "invoicing.csv"
-    qb_path = None
-    try:
-        from pathlib import Path
-        out_dir = None
-        if csv_path:
-            # Put invoicing.csv right next to the base invoice CSV
-            out_dir = Path(csv_path).parent
-        qb_path = inv_module.export_quickbooks_invoicing_csv(inv_obj, out_dir=out_dir)
-    except Exception as e:
-        # Optional: log so silent failures don't hide bugs
-        import traceback, pathlib
-        log_path = pathlib.Path.home() / "Baymaxx_invoicing_error.log"
-        log_path.write_text(
-            "Error exporting QuickBooks invoicing.csv:\n"
-            f"{e}\n\n{traceback.format_exc()}",
-            encoding="utf-8",
-        )
+        # 2) Decide the output folder once (Monthly MM-DD-YYYY ...)
+        try:
+            out_dir = inv._ensure_out_dir_for_invoice(inv_obj, None)
+        except Exception:
+            try:
+                from pathlib import Path as _P
+                out_dir = inv.invoice_output_dir() or (
+                    _P(__file__).resolve().parent / "data" / "invoices"
+                )
+            except Exception:
+                out_dir = None
+
+        # 3) QuickBooks master "invoicing.csv" in that folder
         qb_path = None
-
-    # 4) PDF (and optional xlsm)
-    xlsm_path = None
-    pdf_path = None
-    try:
-        pdf_path = inv_module.export_invoice_pdf_via_template(
-            inv_obj, template_path
-        )
         try:
-            out_dir = inv_module.invoice_output_dir()
-        except Exception:
-            from pathlib import Path as _P
-            out_dir = _P(__file__).resolve().parent / "data" / "invoices"
-
-        cand = out_dir / (
-            inv_module.invoice_filename(inv_obj, "xlsm").replace(".xlsm", "") + ".xlsm"
-        )
-        if cand.exists():
-            xlsm_path = cand
-    except Exception:
-        pass
-
-    if not pdf_path:
-        try:
-            pdf_path = inv_module.export_invoice_pdf(
-                inv_obj, template_path=template_path
+            qb_path = inv.export_quickbooks_invoicing_csv(inv_obj, out_dir=out_dir)
+        except Exception as e:
+            import traceback, pathlib
+            log_path = pathlib.Path.home() / "Baymaxx_invoicing_error.log"
+            log_path.write_text(
+                "Error exporting QuickBooks invoicing.csv:\n"
+                f"{e}\n\n{traceback.format_exc()}",
+                encoding="utf-8",
             )
-        except Exception:
-            pdf_path = None
+            qb_path = None
 
-    return {
-        "json": json_path,
-        "csv": csv_path,
-        "xlsm": xlsm_path,
-        "pdf": pdf_path,
-        "qb": qb_path,
-    }
+        # 4) Per-division PDFs only (no combined PDF)
+        pdf_path = None  # for the popup message
+        try:
+            div_pdfs = inv.export_division_pdfs(
+                inv_obj,
+                template_path=template_path,
+                out_dir=out_dir,
+            )
+            if div_pdfs:
+                pdf_path = div_pdfs[0]
+        except Exception:
+            pass
+
+        return {
+            "json": str(internal),
+            "csv": None,  # we no longer create the extra invoice CSV
+            "xlsm": None,
+            "pdf": str(pdf_path) if pdf_path else None,
+            "qb": str(qb_path) if qb_path else None,
+        }
+
+    inv.finalize_with_template = _finalize_shim  # patches module at runtime
+
 
 
 

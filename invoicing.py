@@ -376,6 +376,27 @@ def invoice_output_dir() -> Path:
     set_remembered_invoice_root(DEFAULT_USER_INVOICE_ROOT)
     return DEFAULT_USER_INVOICE_ROOT
 
+from datetime import date  # you already import this near the top
+
+def _ensure_out_dir_for_invoice(inv: Dict[str, Any], out_dir: str | Path | None) -> Path:
+    """Resolve and create the output directory for a given invoice.
+
+    If *out_dir* is provided, use it as-is.
+    Otherwise create a dated subfolder under the remembered invoice_output_dir(),
+    e.g. "Monthly 11-19-2025".
+    """
+    if out_dir is not None:
+        path = Path(out_dir)
+    else:
+        root = invoice_output_dir()
+        inv_type = str(inv.get("type") or "invoice").capitalize()
+        today_str = date.today().strftime("%m-%d-%Y")
+        folder_name = f"{inv_type} {today_str}"
+        path = root / folder_name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _ensure_out_dir_for_invoice(inv: Dict[str, Any], out_dir: str | Path | None) -> Path:
     """Resolve and create the output directory for a given invoice.
 
@@ -1074,16 +1095,15 @@ def invoice_filename(inv: Dict[str, Any], ext: str) -> str:
     return f"Invoice-{ym}-{inv.get('id','')}.{ext.lstrip('.')}"
 
 def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -> Path:
-    """
-    Export an invoice (from dict) to CSV with columns:
-    Description,Qty,Unit Price,Amount,Subtotal,Tax,Total
-    Saves to a dated subfolder under the remembered invoice_output_dir()
-    if out_dir not provided.
-    Returns the CSV path.
+    """Export an invoice to CSV (human-friendly).
+
+    Columns: Description, Qty, Unit Price, Amount
+    with a summary of Subtotal, Tax, Total at the bottom.
+
+    If *out_dir* is not provided, files go into a dated subfolder under
+    the remembered invoice_output_dir(), e.g. "Monthly 11-19-2025".
     """
     _recalc_totals(inv)
-
-    # NEW: choose "Monthly MM-DD-YYYY" (etc.) folder
     out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
 
     csv_path = out_dir / invoice_filename(inv, "csv")
@@ -1093,7 +1113,12 @@ def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     w = _csv.writer(buf, lineterminator="\n")
     w.writerow(["Description", "Qty", "Unit Price", "Amount"])
     for li in inv.get("line_items", []):
-        w.writerow([li.get("description",""), li.get("qty",0), li.get("unit_price",0), li.get("amount",0)])
+        w.writerow([
+            li.get("description", ""),
+            li.get("qty", 0),
+            li.get("unit_price", 0),
+            li.get("amount", 0),
+        ])
     w.writerow([])
     totals = inv.get("totals", {})
     w.writerow(["Subtotal", "", "", totals.get("subtotal", 0)])
@@ -1102,6 +1127,7 @@ def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -
 
     csv_path.write_text(buf.getvalue(), encoding="utf-8")
     return csv_path
+
 
 
 # ---------- Simple PDF export (ReportLab) ----------
@@ -1121,11 +1147,8 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
         raise RuntimeError("reportlab is required: pip install reportlab") from e
 
     _recalc_totals(inv)
-      
     out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
-
     pdf_path = out_dir / invoice_filename(inv, "pdf")
-
 
     # --- basic layout ---
     c = canvas.Canvas(str(pdf_path), pagesize=LETTER)
@@ -1152,6 +1175,12 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     snap = inv.get("client_name_snapshot", "")
     if snap:
         c.drawString(x_margin, y, f"Client: {snap}")
+        y -= 16
+
+    # NEW: division label (for per-division PDFs)
+    div_name = inv.get("division_name", "")
+    if div_name:
+        c.drawString(x_margin, y, f"Division: {div_name}")
         y -= 16
 
     # Table header
@@ -1184,14 +1213,13 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
             c.setFont("Helvetica", 10)
 
         raw_desc = str(li.get("description", ""))
-        # 🔹 Try to append (-LAST4) using your mapping helper
+        # Try to append (-LAST4) using your mapping helper
         try:
             desc = decorate_with_last4_kind(inv, raw_desc)
         except Exception:
             desc = raw_desc
-        desc = desc[:80]
 
-        # 🔹 FIXED: show whole quantity without stripping zeros
+        # Quantity formatting
         qty_val = li.get("qty", 0)
         try:
             qty = str(int(round(float(qty_val))))
@@ -1225,6 +1253,7 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     c.showPage()
     c.save()
     return pdf_path
+
 
 
 def _iter_sites_in_clients_order(clients_doc: dict):
@@ -1619,31 +1648,146 @@ def export_quickbooks_invoicing_csv(
     return csv_path
 
 
+
+
 # === END: exporter decoration helpers ===
 
 
+def export_division_pdfs(
+    inv: Dict[str, Any],
+    template_path: str | Path | None = None,
+    out_dir: str | Path | None = None,
+) -> list[Path]:
+    """Export one PDF per division for this invoice using the template if available.
+
+    - One PDF per division in clients.json order (skipping empty divisions).
+    - Leftover items (unmapped sites) go into an "(Unassigned)" PDF.
+    - Each division invoice gets a human_number that matches the QuickBooks logic.
+    """
+    # Resolve output directory (Monthly MM-DD-YYYY folder, etc.)
+    if out_dir is None:
+        try:
+            out_dir_path = _ensure_out_dir_for_invoice(inv, None)
+        except Exception:
+            try:
+                out_dir_path = invoice_output_dir()
+            except Exception:
+                out_dir_path = Path("invoices_output")
+    else:
+        out_dir_path = Path(out_dir)
+        out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    client_name = inv.get("client_name_snapshot") or ""
+    clients_doc = _load_clients_doc()
+    div_order, site_map = _build_site_division_index_for_client(
+        clients_doc, client_name
+    )
+
+    # Group line items by division
+    by_div: dict[str, list[Dict[str, Any]]] = {}
+    leftovers: list[Dict[str, Any]] = []
+
+    for li in inv.get("line_items", []):
+        desc = str(li.get("description", "") or "")
+        key = _normalize_site_key(desc)
+        info = site_map.get(key)
+        if not info:
+            leftovers.append(li)
+            continue
+        dname, di, si = info
+        by_div.setdefault(dname, []).append(li)
+
+    results: list[Path] = []
+
+    import copy, re as _re
+
+    def _slugify(name: str) -> str:
+        s = _re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
+        return s or "div"
+
+    base_id = str(inv.get("id", ""))
+
+    # Decide if we can use the Excel template
+    tpl: Path | None = None
+    if template_path is not None:
+        p = Path(template_path)
+        if p.exists() and os.name == "nt":
+            tpl = p
+
+    # Compute invoice numbers the same way as QuickBooks export
+    start_no = inv.get("starting_invoice_number")
+    try:
+        current_invoice_no = int(start_no)
+    except Exception:
+        current_invoice_no = 1
+
+    def _make_pdf(div_inv: Dict[str, Any]) -> Path:
+        # Use Excel template when available, otherwise fallback PDF
+        if tpl is not None:
+            path = export_invoice_pdf_via_template(
+                div_inv, tpl, out_dir=out_dir_path
+            )
+            # Clean up intermediate xlsm/xlsx/csv for this division
+            stem = invoice_filename(div_inv, "xlsm").replace(".xlsm", "")
+            for ext in (".xlsm", ".xlsx", ".csv"):
+                cand = out_dir_path / f"{stem}{ext}"
+                if cand.exists():
+                    try:
+                        cand.unlink()
+                    except Exception:
+                        pass
+            return Path(path)
+        else:
+            return export_invoice_pdf(div_inv, out_dir=out_dir_path)
+
+    # 1) Known divisions in clients.json order
+    for dname in div_order:
+        items = by_div.get(dname)
+        if not items:
+            continue
+        div_inv = copy.deepcopy(inv)
+        div_inv["division_name"] = dname
+        div_inv["line_items"] = items
+        div_inv["totals"] = {}
+        div_inv["id"] = f"{base_id}-{_slugify(dname)}"
+        div_inv["human_number"] = current_invoice_no
+        try:
+            _recalc_totals(div_inv)
+        except Exception:
+            pass
+        pdf = _make_pdf(div_inv)
+        results.append(pdf)
+        current_invoice_no += 1
+
+    # 2) Leftovers as "(Unassigned)" if any
+    if leftovers:
+        dname = "(Unassigned)"
+        div_inv = copy.deepcopy(inv)
+        div_inv["division_name"] = dname
+        div_inv["line_items"] = leftovers
+        div_inv["totals"] = {}
+        div_inv["id"] = f"{base_id}-{_slugify('unassigned')}"
+        div_inv["human_number"] = current_invoice_no
+        try:
+            _recalc_totals(div_inv)
+        except Exception:
+            pass
+        pdf = _make_pdf(div_inv)
+        results.append(pdf)
+
+    return results
+
+
 
 from pathlib import Path
 from typing import Any, Dict, List
 
-
-
-from pathlib import Path
-from typing import Any, Dict, List
-
-def export_invoice_pdf_via_template(inv: Dict[str, Any],
-                                    template_path: str | Path,
-                                    out_dir: str | Path | None = None,
-                                    clients_path: str | Path | None = None) -> Path:
-    """
-    Export invoice to Excel (and PDF via Excel COM) with:
-      - Date = TODAY → H5 (and H7), m/d/yyyy
-      - Writes line items from inv["line_items"] (fallback to inv["items"]) starting at row 13
-        A=Description, F=Qty, G=Unit, H=Amount (=F*G)
-      - Keeps VOICE/SMS visible and appends (-LAST4) where resolvable
-      - Fills Bill-To A8..A10 (uses your helpers if available)
-      - Preserves SUBTOTAL/TOTAL rows (fills only if blank)
-    """
+def export_invoice_pdf_via_template(
+    inv: Dict[str, Any],
+    template_path: str | Path,
+    out_dir: str | Path | None = None,
+    clients_path: str | Path | None = None,
+) -> Path:
     import openpyxl
     from openpyxl import load_workbook
     from datetime import datetime
@@ -1652,25 +1796,32 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     if not tpl.exists():
         raise FileNotFoundError(f"Template not found: {tpl}")
 
+    # ----- resolve output directory -----
     if out_dir is None:
         try:
-            out_dir = invoice_output_dir() or INVOICES_DIR
-        except NameError:
+            out_dir = invoice_output_dir()  # uses your existing helper
+        except Exception:
             out_dir = Path("invoices_output")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # ----- load template -----
     wb = load_workbook(tpl, data_only=False, keep_vba=True)
     ws = wb.active
 
-    # Header
-    inv_num = inv.get("human_number") or inv.get("starting_invoice_number") or inv.get("id")
+    # ===== HEADER: INVOICE NUMBER =====
+    invoice_number = (
+        inv.get("human_number")              # best: per-division number
+        or inv.get("qb_invoice_number")      # optional alias
+        or inv.get("starting_invoice_number")
+        or inv.get("id")
+    )
     try:
-        ws["G5"].value = inv_num
+        ws["G5"].value = str(invoice_number)
     except Exception:
         pass
 
-    # Date: today into H5 and H7
+    # ===== HEADER: DATES (TODAY) =====
     today = datetime.today()
     for cell in ("H5", "H7"):
         try:
@@ -1679,63 +1830,80 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         except Exception:
             pass
 
-    # Terms
+    # ===== TERMS =====
     try:
-        if not ws["H8"].value or str(ws["H8"].value).strip() == "":
+        val = ws["H8"].value
+        if val is None or str(val).strip() == "":
             ws["H8"].value = "Due on Receipt"
     except Exception:
         pass
 
-
-
-
-
-
-
-    # Bill-To lines (A8..A10)
+    # ===== BILL-TO (A8..A10) =====
     def _bill_to_lines() -> List[str]:
+        # Try clients.json via helpers first
         try:
             load_clients = globals().get("_load_clients_doc")
             find_addr = globals().get("_find_client_address")
             if callable(load_clients) and callable(find_addr):
-                doc = load_clients(inv.get("clients_path") if clients_path is None else clients_path)
-                lines = find_addr(doc, inv.get("client_name_snapshot"))
+                doc = load_clients()
+                client_name = (
+                    inv.get("client_name_snapshot")
+                    or inv.get("client_name")
+                    or ""
+                )
+                lines = find_addr(doc, client_name)
                 if isinstance(lines, list) and lines:
                     return [str(x) for x in lines][:3]
         except Exception:
+            # fall through to inline data
             pass
-        client = inv.get("client_snapshot") or inv.get("client") or {}
-        name = (client.get("name") or "").strip()
-        addr = (client.get("address") or "").strip()
+
+        # Fallback: use invoice-embedded client info
+        name = (
+            inv.get("client_name_snapshot")
+            or inv.get("client_name")
+            or ""
+        )
+        addr = (
+            inv.get("client_address_snapshot")
+            or inv.get("client_address")
+            or ""
+        )
+
         out: List[str] = []
-        if name: out.append(name)
+        if name:
+            out.append(str(name))
         if addr:
-            for line in addr.splitlines():
+            for line in str(addr).splitlines():
                 line = line.strip()
-                if line: out.append(line)
+                if line:
+                    out.append(line)
+
         return out[:3]
 
     try:
         lines = _bill_to_lines()
         for i in range(3):
-            ws[f"A{8+i}"].value = lines[i] if i < len(lines) else None
+            ws[f"A{8 + i}"].value = lines[i] if i < len(lines) else None
     except Exception:
         pass
 
-    # Items
+    # ===== LINE ITEMS =====
     row = 13
     line_items = inv.get("line_items", [])
     if not isinstance(line_items, list) or not line_items:
         line_items = inv.get("items", []) or []
 
     for li in line_items:
-        # A=Desc, F=Qty, G=Unit, H=Amount
         try:
             raw_desc = li.get("description", "")
-            ws[f"A{row}"].value = decorate_with_last4_kind(inv, raw_desc)
+            # decorate_with_last4_kind already exists in this module
+            desc = decorate_with_last4_kind(inv, raw_desc)
         except Exception:
-            ws[f"A{row}"].value = li.get("description", "")
+            desc = li.get("description", "")
+
         try:
+            ws[f"A{row}"].value = desc
             ws[f"F{row}"].value = float(li.get("qty", 0) or 0.0)
             ws[f"G{row}"].value = float(li.get("unit_price", 0) or 0.0)
             if ws[f"H{row}"].value in (None, ""):
@@ -1746,7 +1914,7 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
 
     last_item_row = max(13, row - 1)
 
-    # Locate labels
+    # ===== SUBTOTAL / TOTAL FORMULAS =====
     def _find_label_row(label: str) -> int | None:
         L = label.strip().upper()
         for r in range(13, 200):
@@ -1759,38 +1927,42 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
     subtotal_row = _find_label_row("SUBTOTAL")
     total_row = _find_label_row("TOTAL")
 
-    # Clear trailing items but NOT subtotal/total block
+    # Clear trailing rows between last item and subtotal
     start_clear = last_item_row + 1
     stop_clear = subtotal_row if subtotal_row else start_clear
     if subtotal_row and start_clear < subtotal_row:
         for r in range(start_clear, subtotal_row):
-            for c in ("A","F","G","H"):
+            for col in ("A", "F", "G", "H"):
                 try:
-                    ws[f"{c}{r}"].value = None
+                    ws[f"{col}{r}"].value = None
                 except Exception:
                     pass
 
-    # Ensure formulas if blank
+    # Subtotal formula
     subtotal_formula = f"=SUM(H13:H{last_item_row})"
     try:
         if subtotal_row:
-            if ws[f"H{subtotal_row}"].value in (None, ""):
-                ws[f"H{subtotal_row}"].value = subtotal_formula
+            cell = ws[f"H{subtotal_row}"]
+            if cell.value in (None, ""):
+                cell.value = subtotal_formula
         else:
             ws["H16"].value = subtotal_formula
             subtotal_row = 16
     except Exception:
         pass
+
+    # Total formula
     try:
         if total_row:
-            if ws[f"H{total_row}"].value in (None, ""):
-                ws[f"H{total_row}"].value = f"=H{subtotal_row}"
+            cell = ws[f"H{total_row}"]
+            if cell.value in (None, ""):
+                cell.value = f"=H{subtotal_row}"
         else:
             ws["H17"].value = f"=H{subtotal_row}"
     except Exception:
         pass
 
-    # Save & export
+    # ===== SAVE & EXPORT TO PDF VIA EXCEL COM =====
     xlsm_path = out_dir / invoice_filename(inv, "xlsm")
     wb.save(xlsm_path)
 
@@ -1806,7 +1978,9 @@ def export_invoice_pdf_via_template(inv: Dict[str, Any],
         excel.Quit()
         return pdf_path
     except Exception as e:
-        raise RuntimeError(f"Excel export failed (install Excel + pywin32). Filled workbook at: {xlsm_path}") from e
+        raise RuntimeError(
+            f"Excel export failed (install Excel + pywin32). Filled workbook at: {xlsm_path}"
+        ) from e
 
 
 

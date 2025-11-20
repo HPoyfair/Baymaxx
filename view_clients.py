@@ -332,26 +332,46 @@ def _move_in_list(items: list, index: int, direction: int) -> bool:
     return True
 
 
-def move_client(client_id: str, direction: int) -> bool:
+def _move_by_id(items: list, item_id: str, delta: int) -> bool:
     """
-    Move a client up/down in the clients list.
-    direction = -1 (up), +1 (down).
+    Generic: move dict with .id == item_id up/down by `delta` inside `items`.
+    Returns True if something moved.
+    """
+    if not isinstance(items, list):
+        return False
+    idx = None
+    for i, obj in enumerate(items):
+        if isinstance(obj, dict) and obj.get("id") == item_id:
+            idx = i
+            break
+    if idx is None:
+        return False
+    new_idx = idx + delta
+    if new_idx < 0 or new_idx >= len(items):
+        return False
+    items[idx], items[new_idx] = items[new_idx], items[idx]
+    return True
+
+
+def move_client(client_id: str, delta: int) -> bool:
+    """
+    Move a client up/down in the top-level clients list.
+    delta = -1 (up), +1 (down).
     """
     doc = load_clients()
     clients = doc.get("clients", [])
     if not isinstance(clients, list):
         return False
-
-    for i, c in enumerate(clients):
-        if isinstance(c, dict) and c.get("id") == client_id:
-            if _move_in_list(clients, i, direction):
-                save_clients(doc)
-                return True
-            return False
-    return False
+    if not _move_by_id(clients, client_id, delta):
+        return False
+    save_clients(doc)
+    return True
 
 
-def move_division(client_id: str, division_id: str, direction: int) -> bool:
+def move_division(client_id: str, division_id: str, delta: int) -> bool:
+    """
+    Move a division up/down within a given client.
+    """
     doc = load_clients()
     clients = doc.get("clients", [])
     if not isinstance(clients, list):
@@ -363,16 +383,18 @@ def move_division(client_id: str, division_id: str, direction: int) -> bool:
         divisions = c.get("divisions", [])
         if not isinstance(divisions, list):
             return False
-        for i, d in enumerate(divisions):
-            if isinstance(d, dict) and d.get("id") == division_id:
-                if _move_in_list(divisions, i, direction):
-                    save_clients(doc)
-                    return True
-                return False
+        if not _move_by_id(divisions, division_id, delta):
+            return False
+        save_clients(doc)
+        return True
+
     return False
 
 
-def move_site(client_id: str, division_id: str, site_id: str, direction: int) -> bool:
+def move_site(client_id: str, division_id: str, site_id: str, delta: int) -> bool:
+    """
+    Move a site up/down within a given division of a given client.
+    """
     doc = load_clients()
     clients = doc.get("clients", [])
     if not isinstance(clients, list):
@@ -390,13 +412,13 @@ def move_site(client_id: str, division_id: str, site_id: str, direction: int) ->
             sites = d.get("sites", [])
             if not isinstance(sites, list):
                 return False
-            for i, s in enumerate(sites):
-                if isinstance(s, dict) and s.get("id") == site_id:
-                    if _move_in_list(sites, i, direction):
-                        save_clients(doc)
-                        return True
-                    return False
+            if not _move_by_id(sites, site_id, delta):
+                return False
+            save_clients(doc)
+            return True
+
     return False
+
 
 
 
