@@ -1202,17 +1202,37 @@ class MonthlyImportView(ttk.Frame):
 
 class ViewInvoicesView(ttk.Frame):
     """Simple list of saved invoices using invoicing.list_invoices()."""
+
     def __init__(self, parent: tk.Widget, on_back):
         super().__init__(parent, padding=12)
         self.on_back = on_back
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
+        # Header: title + Delete + Back
         hdr = ttk.Frame(self)
         hdr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(hdr, text="Past Invoices", font=("", 14, "bold")).pack(side="left")
-        ttk.Button(hdr, text="Back", command=self.on_back).pack(side="right")
 
+        ttk.Label(hdr, text="Past Invoices", font=("", 14, "bold")).pack(
+            side="left"
+        )
+
+        btn_bar = ttk.Frame(hdr)
+        btn_bar.pack(side="right")
+
+        ttk.Button(
+            btn_bar,
+            text="Delete Selected",
+            command=self._on_delete_selected,
+        ).pack(side="right", padx=(0, 8))
+
+        ttk.Button(
+            btn_bar,
+            text="Back",
+            command=self.on_back,
+        ).pack(side="right")
+
+        # Table of invoices
         cols = ("id", "type", "period", "client", "total")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
         self.tree.heading("id", text="ID")
@@ -1220,16 +1240,63 @@ class ViewInvoicesView(ttk.Frame):
         self.tree.heading("period", text="Period")
         self.tree.heading("client", text="Client")
         self.tree.heading("total", text="Total")
+
         self.tree.column("id", width=220, anchor="w")
         self.tree.column("type", width=80, anchor="center")
         self.tree.column("period", width=120, anchor="center")
         self.tree.column("client", width=220, anchor="w")
         self.tree.column("total", width=100, anchor="e")
+
         self.tree.grid(row=1, column=0, sticky="nsew")
 
         ybar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         ybar.grid(row=1, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=ybar.set)
+
+        self.refresh()
+
+    # ---- internal helpers ----
+
+    def _get_selected_invoice_id(self) -> str | None:
+        """Return the invoice ID for the currently selected row, or None."""
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        item = self.tree.item(sel[0])
+        values = item.get("values") or ()
+        if not values:
+            return None
+        # first column = id
+        return str(values[0])
+
+    def _on_delete_selected(self) -> None:
+        pid = self._get_selected_invoice_id()
+        if not pid:
+            messagebox.showinfo(
+                "Delete Invoice", "Please select an invoice to delete."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Delete Invoice",
+            f"Delete invoice {pid}?\n\nThis cannot be undone.",
+            icon=messagebox.WARNING,
+        ):
+            return
+
+        try:
+            ok = inv.delete_invoice(pid)
+        except Exception as e:
+            messagebox.showerror(
+                "Delete Invoice", f"Could not delete invoice:\n{e}"
+            )
+            return
+
+        if not ok:
+            messagebox.showinfo(
+                "Delete Invoice",
+                "Invoice JSON file was not found (it may already be deleted).",
+            )
 
         self.refresh()
 
@@ -1253,7 +1320,12 @@ class ViewInvoicesView(ttk.Frame):
                 ptxt = ""
             client = item.get("client_name", "") or item.get("client_id", "")
             total = item.get("total", 0.0)
-            self.tree.insert("", tk.END, values=(pid, ptype, ptxt, client, f"{total:,.2f}"))
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(pid, ptype, ptxt, client, f"{total:,.2f}"),
+            )
+
 # ---------------- Helpers for invoice edits & finalize ----------------
 
 def load_clients_doc(path):

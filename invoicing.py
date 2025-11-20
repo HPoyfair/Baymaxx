@@ -376,6 +376,29 @@ def invoice_output_dir() -> Path:
     set_remembered_invoice_root(DEFAULT_USER_INVOICE_ROOT)
     return DEFAULT_USER_INVOICE_ROOT
 
+def _ensure_out_dir_for_invoice(inv: Dict[str, Any], out_dir: str | Path | None) -> Path:
+    """Resolve and create the output directory for a given invoice.
+
+    If out_dir is provided, that path is used.
+    Otherwise we create a subfolder under the remembered invoice root in the form:
+
+        "<Type> MM-DD-YYYY"
+
+    For example: "Monthly 11-19-2025".
+    """
+    if out_dir is not None:
+        out_path = Path(out_dir)
+    else:
+        root = invoice_output_dir() or INVOICES_DIR
+        inv_type = str(inv.get("type") or "invoice").capitalize()
+        today_str = date.today().strftime("%m-%d-%Y")
+        folder_name = f"{inv_type} {today_str}"
+        out_path = Path(root) / folder_name
+
+    out_path.mkdir(parents=True, exist_ok=True)
+    return out_path
+
+
 
 # ---------- invoice API ----------
 def new_monthly_invoice(
@@ -451,6 +474,24 @@ def load_invoice(invoice_id: str) -> Dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    
+def delete_invoice(invoice_id: str) -> bool:
+    """
+    Delete a single invoice JSON from data/invoices/<id>.json.
+
+    Returns True if the file existed and was removed, False otherwise.
+    (For now we only remove the internal JSON; exported CSV/PDF files
+    in the user-facing invoices folder are left alone.)
+    """
+    path = INVOICES_DIR / f"{invoice_id}.json"
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except Exception:
+        return False
+
 
 
 def list_invoices() -> List[Dict[str, Any]]:
@@ -1036,19 +1077,20 @@ def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     """
     Export an invoice (from dict) to CSV with columns:
     Description,Qty,Unit Price,Amount,Subtotal,Tax,Total
-    Saves to the remembered invoice_output_dir() if out_dir not provided.
+    Saves to a dated subfolder under the remembered invoice_output_dir()
+    if out_dir not provided.
     Returns the CSV path.
     """
     _recalc_totals(inv)
-    if out_dir is None:
-        out_dir = invoice_output_dir() or INVOICES_DIR
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # NEW: choose "Monthly MM-DD-YYYY" (etc.) folder
+    out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
+
     csv_path = out_dir / invoice_filename(inv, "csv")
 
     import io, csv as _csv
     buf = io.StringIO()
-    w = _csv.writer(buf, lineterminator="\\n")
+    w = _csv.writer(buf, lineterminator="\n")
     w.writerow(["Description", "Qty", "Unit Price", "Amount"])
     for li in inv.get("line_items", []):
         w.writerow([li.get("description",""), li.get("qty",0), li.get("unit_price",0), li.get("amount",0)])
@@ -1060,6 +1102,7 @@ def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -
 
     csv_path.write_text(buf.getvalue(), encoding="utf-8")
     return csv_path
+
 
 # ---------- Simple PDF export (ReportLab) ----------
 
@@ -1078,12 +1121,11 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
         raise RuntimeError("reportlab is required: pip install reportlab") from e
 
     _recalc_totals(inv)
-    if out_dir is None:
-        out_dir = invoice_output_dir() or INVOICES_DIR
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+      
+    out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
 
     pdf_path = out_dir / invoice_filename(inv, "pdf")
+
 
     # --- basic layout ---
     c = canvas.Canvas(str(pdf_path), pagesize=LETTER)
@@ -1508,10 +1550,10 @@ def export_quickbooks_invoicing_csv(
             return current_invoice_no
 
         # sort by site index within that division
-        items = sorted(items, key=lambda t: t[1])
+        items_sorted = sorted(items, key=lambda t: t[1])
 
         first = True
-        for _, _, li in items:
+        for _, _, li in items_sorted:
             qty_val = li.get("qty", 0)
             try:
                 qty = str(int(round(float(qty_val))))
@@ -1566,11 +1608,7 @@ def export_quickbooks_invoicing_csv(
         )
 
     # ----- write CSV -----
-    if out_dir is None:
-        out_dir = invoice_output_dir()
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+    out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
     csv_path = out_dir / csv_name
 
     with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
@@ -1579,7 +1617,6 @@ def export_quickbooks_invoicing_csv(
         w.writerows(rows)
 
     return csv_path
-
 
 
 # === END: exporter decoration helpers ===
