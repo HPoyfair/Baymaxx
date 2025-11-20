@@ -157,21 +157,7 @@ def _normalize_site_key(s: str) -> str:
 
 
    
-    load_clients = globals().get('_load_clients_doc') or globals().get('load_clients_doc')
-    if callable(load_clients):
-        try:
-            clients_doc = load_clients(inv.get('clients_path'))
-        except TypeError:
-            clients_doc = load_clients()
-        if isinstance(clients_doc, dict):
-            for c in (clients_doc.get('clients') or []):
-                for s in (c.get('sites') or []):
-                    nm = (s.get('name') or '').strip()
-                    ph = (s.get('phone') or '').strip()
-                    if nm and ph.isdigit() and len(ph) == 4:
-                        phones.setdefault(_normalize_site_key(nm), ph)
-    return phones
-
+  
 
 
 
@@ -1446,6 +1432,7 @@ def _build_site_division_index_for_client(
 
     return (div_order, site_map)
 
+from datetime import date
 
 def export_quickbooks_invoicing_csv(
     inv: Dict[str, Any],
@@ -1477,9 +1464,12 @@ def export_quickbooks_invoicing_csv(
     except Exception:
         invoice_no = 1
 
-    service_date = _last_day_of_month(year, month)
-    invoice_date = service_date          # simple rule; can be changed later
-    due_date = service_date              # same as invoice date for now
+    # Invoice/Due date = last day of invoice month
+    invoice_date = _last_day_of_month(year, month)
+    due_date = invoice_date
+
+    # Service Date = today's date when file is generated
+    service_date = date.today()
 
     inv_date_s = _fmt_us_date(invoice_date)
     due_date_s = _fmt_us_date(due_date)
@@ -1589,6 +1579,7 @@ def export_quickbooks_invoicing_csv(
         w.writerows(rows)
 
     return csv_path
+
 
 
 # === END: exporter decoration helpers ===
