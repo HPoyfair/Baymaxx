@@ -31,11 +31,9 @@ _importlib_local.reload(inv)  # ensure latest file is used
 # ================== App version & updater ==================
 import re
 
-__version__ = "0.0.0"  # <-- bump this when you release
+__version__ = "1.3.1"
+GITHUB_MANIFEST_URL = "https://raw.githubusercontent.com/HPoyfair/Baymaxx/main/manifest.json"
 
-# Raw GitHub manifest URL (example format shown below).
-# You will replace <OWNER> / <REPO> / branch as needed.
-GITHUB_MANIFEST_URL = "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/manifest.json"
 
 def _parse_version(v: str) -> tuple[int, ...]:
     """Parse '1.2.3' -> (1,2,3). Non-numeric parts are ignored."""
