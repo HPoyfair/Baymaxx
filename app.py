@@ -28,6 +28,147 @@ if _HERE not in _sys_local.path:
 
 import invoicing as inv
 _importlib_local.reload(inv)  # ensure latest file is used
+# ================== App version & updater ==================
+import re
+
+__version__ = "0.0.0"  # <-- bump this when you release
+
+# Raw GitHub manifest URL (example format shown below).
+# You will replace <OWNER> / <REPO> / branch as needed.
+GITHUB_MANIFEST_URL = "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/manifest.json"
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """Parse '1.2.3' -> (1,2,3). Non-numeric parts are ignored."""
+    parts = []
+    for p in str(v).strip().split("."):
+        m = re.match(r"(\d+)", p)
+        if m:
+            parts.append(int(m.group(1)))
+    return tuple(parts) if parts else (0,)
+
+def _is_newer(remote: str, local: str) -> bool:
+    return _parse_version(remote) > _parse_version(local)
+
+def _fetch_manifest(url: str) -> dict:
+    """Download and parse the update manifest JSON from GitHub."""
+    import urllib.request, urllib.error
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"Baymaxx/{__version__}",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = resp.read().decode("utf-8")
+    return json.loads(data)
+
+def _download_file(url: str, dest: Path, progress_cb=None) -> Path:
+    """Download a file to dest, optionally calling progress_cb(downloaded, total)."""
+    import urllib.request
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=30) as r:
+        total = int(r.headers.get("Content-Length", "0") or 0)
+        downloaded = 0
+        chunk = 1024 * 256
+        with open(dest, "wb") as f:
+            while True:
+                b = r.read(chunk)
+                if not b:
+                    break
+                f.write(b)
+                downloaded += len(b)
+                if progress_cb:
+                    progress_cb(downloaded, total)
+    return dest
+
+def check_for_updates_ui(parent: tk.Tk | None = None) -> None:
+    """UI entrypoint: check GitHub manifest and optionally update."""
+    try:
+        manifest = _fetch_manifest(GITHUB_MANIFEST_URL)
+    except Exception as e:
+        messagebox.showerror("Update Check Failed", f"Could not reach update server.\n\n{e}", parent=parent)
+        return
+
+    remote_ver = str(manifest.get("version", "")).strip()
+    release_url = str(manifest.get("release_url", "")).strip()
+    notes = str(manifest.get("notes", "")).strip()
+
+    if not remote_ver or not release_url:
+        messagebox.showerror("Update Check Failed",
+                             "Manifest is missing 'version' or 'release_url'.",
+                             parent=parent)
+        return
+
+    if not _is_newer(remote_ver, __version__):
+        messagebox.showinfo("Baymaxx is up to date",
+                            f"You're on the latest version ({__version__}).",
+                            parent=parent)
+        return
+
+    msg = f"A newer Baymaxx version is available.\n\nCurrent: {__version__}\nNew: {remote_ver}"
+    if notes:
+        msg += f"\n\nWhat's new:\n{notes}"
+
+    if not messagebox.askyesno("Update Available", msg + "\n\nDownload and install now?", parent=parent):
+        return
+
+    if getattr(sys, "frozen", False):
+        try:
+            import tempfile
+            tmp_dir = Path(tempfile.gettempdir()) / "BaymaxxUpdates"
+            filename = Path(release_url).name or f"Baymaxx-{remote_ver}.exe"
+            dest = tmp_dir / filename
+
+            prog = tk.Toplevel(parent) if parent else tk.Toplevel()
+            prog.title("Downloading update...")
+            prog.geometry("360x110")
+            ttk.Label(prog, text=f"Downloading Baymaxx {remote_ver}...").pack(pady=(12, 4))
+            bar = ttk.Progressbar(prog, length=320, mode="determinate")
+            bar.pack(pady=6)
+            pct_lbl = ttk.Label(prog, text="")
+            pct_lbl.pack()
+
+            def _cb(done, total):
+                if total:
+                    bar["maximum"] = total
+                    bar["value"] = done
+                    pct = int(done * 100 / total)
+                    pct_lbl.config(text=f"{pct}%")
+                prog.update_idletasks()
+
+            _download_file(release_url, dest, progress_cb=_cb)
+            prog.destroy()
+
+            try:
+                os.startfile(dest)  # Windows
+            except Exception:
+                import subprocess
+                subprocess.Popen([str(dest)], shell=True)
+
+            messagebox.showinfo(
+                "Updater Launched",
+                "The installer has been started.\n\nPlease close Baymaxx to continue updating.",
+                parent=parent
+            )
+        except Exception as e:
+            messagebox.showerror("Update Failed", f"Could not download/install update.\n\n{e}", parent=parent)
+        return
+
+    try:
+        import webbrowser
+        webbrowser.open(release_url)
+        messagebox.showinfo(
+            "Update Download",
+            "Your browser has been opened to download the latest version.\n"
+            "After downloading, re-run Baymaxx from the new folder.",
+            parent=parent
+        )
+    except Exception as e:
+        messagebox.showerror("Update Failed", f"Could not open download page.\n\n{e}", parent=parent)
+
+# ============================================================
 
 
 CELL_MAP = {
@@ -124,6 +265,10 @@ class App(tk.Tk):
         ttk.Button(sidebar, text="New Individual Invoice").pack(fill="x", pady=6)
         ttk.Button(sidebar, text="View Clients",
                    command=self.open_clients_manager).pack(fill="x", pady=6)
+        ttk.Separator(sidebar, orient="horizontal").pack(fill="x", pady=(10, 6))
+        ttk.Button(sidebar, text="Check for Updates",
+                   command=lambda: check_for_updates_ui(self)).pack(fill="x", pady=6)
+
 
         # ---- right content (logo centered)
         self.content = ttk.Frame(self, padding=16)
