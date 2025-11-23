@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Iterable
 import json
 import uuid
 import os
@@ -38,7 +38,9 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-# ---------- required core helpers (paste into invoicing.py) ----------
+# ======================================================================
+# Canonical line-item + totals helpers (SINGLE SOURCE OF TRUTH)
+# ======================================================================
 
 def _ensure_line_items(inv: dict) -> list:
     """Make sure inv['line_items'] exists and is a list; return it."""
@@ -46,103 +48,61 @@ def _ensure_line_items(inv: dict) -> list:
         inv["line_items"] = []
     return inv["line_items"]
 
+
 def recompute_totals(inv: dict) -> None:
     """Recalculate invoice total from line items (qty * unit_price)."""
-    total = 0.0
+    subtotal = 0.0
     for li in inv.get("line_items", []):
-        # ensure each line has an amount
         qty = float(li.get("qty", 0) or 0)
         price = float(li.get("unit_price", 0) or 0)
         amt = round(qty * price, 2)
         li["amount"] = amt
-        total += amt
-    inv["total"] = round(total, 2)
+        subtotal += amt
 
-def add_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
-    """
-    Append a line item and keep totals in sync.
-    Called by add_voice_items_to_invoice / add_message_items_to_invoice.
-    """
+    inv.setdefault("totals", {})
+    inv["totals"]["subtotal"] = round(subtotal, 2)
+    tax_rate = float(inv.get("tax_rate", 0.0))
+    inv["totals"]["tax"] = round(subtotal * tax_rate, 2)
+    inv["totals"]["total"] = round(inv["totals"]["subtotal"] + inv["totals"]["tax"], 2)
+
+
+# canonical add_line_item
+def add_line_item(inv: Dict[str, Any], description: str, qty: float, unit_price: float) -> None:
+    """Append a line item and recalc totals."""
     items = _ensure_line_items(inv)
     qty = float(qty or 0)
     unit_price = float(unit_price or 0.0)
     amount = round(qty * unit_price, 2)
 
     items.append({
-        "description": description or "",
+        "description": (description or "").strip(),
         "qty": qty,
         "unit_price": unit_price,
         "amount": amount,
     })
-    _recompute_totals(inv)
-
-# (optional) public alias if any other code prefers this name
-def add_line_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
-    _add_item(inv, description, qty, unit_price)
-# --------------------------------------------------------------------
+    recompute_totals(inv)
 
 
-# ==== BEGIN: minimal line-item + totals shims (define only if missing) ====
+# compat aliases used elsewhere
+def add_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
+    add_line_item(inv, description, qty, unit_price)
 
-# Public helper (create if missing)
-if 'add_line_item' not in globals():
-    def add_line_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
-        """
-        Append a line item to inv['line_items'] and keep amount/total in sync.
-        """
-        qty = float(qty or 0)
-        unit_price = float(unit_price or 0.0)
-        amount = round(qty * unit_price, 2)
+def _add_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
+    add_line_item(inv, description, qty, unit_price)
 
-        li = {
-            "description": description or "",
-            "qty": qty,
-            "unit_price": unit_price,
-            "amount": amount,
-        }
-        inv.setdefault("line_items", []).append(li)
-        # keep totals in sync
-        if '_recompute_totals' in globals():
-            _recompute_totals(inv)
-        elif 'recompute_totals' in globals():
-            recompute_totals(inv)
-        else:
-            # minimal inline total calc
-            subtotal = round(sum(float(x.get("amount", 0) or 0) for x in inv.get("line_items", [])), 2)
-            inv["total"] = subtotal
-
-# Private alias expected by app.py or newer helpers
-if '_add_item' not in globals():
-    def _add_item(inv: dict, description: str, qty: float, unit_price: float) -> None:
-        add_line_item(inv, description, qty, unit_price)
-
-# Totals shim if project uses different name
-if '_recompute_totals' not in globals():
-    if 'recompute_totals' in globals():
-        def _recompute_totals(inv: dict) -> None:
-            recompute_totals(inv)
-    else:
-        def _recompute_totals(inv: dict) -> None:
-            subtotal = round(sum(float(x.get("amount", 0) or 0) for x in inv.get("line_items", [])), 2)
-            inv["total"] = subtotal
-
-# ==== END: minimal line-item + totals shims ====
+def _recompute_totals(inv: dict) -> None:
+    recompute_totals(inv)
 
 
+# ======================================================================
+# Messages support & compat helpers
+# ======================================================================
 
-# ================== BEGIN: messages support & compat helpers ==================
-
-# price fallback if not already defined elsewhere
 try:
     UNIT_PRICE_SMS
 except NameError:
     UNIT_PRICE_SMS = 0.14
 
-# compat aliases if your project uses non-underscored names
-if '_add_item' not in globals() and 'add_item' in globals():
-    def _add_item(*a, **k): return add_item(*a, **k)
-if '_recompute_totals' not in globals() and 'recompute_totals' in globals():
-    def _recompute_totals(*a, **k): return recompute_totals(*a, **k)
 
 # ---------------- phone resolution (re-usable) ----------------
 def _normalize_site_key(s: str) -> str:
@@ -156,25 +116,11 @@ def _normalize_site_key(s: str) -> str:
     return u
 
 
-   
-  
-
-
-
 # ---------------- CSV aggregation (month/year) ----------------
 def _extract_row_datetime(row: dict, kind: str):
     """
     Try to parse a datetime from a CSV row for the given kind.
-
-    Much more forgiving:
-    - For calls: look for headers like 'Start Time', 'StartTime', 'Start', 'CallDate'
-    - For messages: look for 'SentDate', 'Date', 'MessageDate', 'SendDate', 'Timestamp'
-    - Then parse common formats, pulling out YYYY-MM-DD or MM/DD/YYYY wherever it appears.
     """
-    from datetime import datetime
-    import re
-
-    # 1) choose the cell to inspect
     def _norm(h: str) -> str:
         return re.sub(r"[\s_\-]+", "", (h or "").strip().lower())
 
@@ -185,21 +131,19 @@ def _extract_row_datetime(row: dict, kind: str):
 
     val = None
     for key, raw in row.items():
-        if _norm(key) in wanted and raw not in (None, ""):
+        nk = _norm(key)
+        if any(tok in nk for tok in wanted) and raw not in (None, ""):
             val = str(raw).strip()
             break
 
     if not val:
         return None
 
-    # 2) try ISO-ish first
     try:
-        # handles '2025-10-31T13:00:53-07:00' and friends
         return datetime.fromisoformat(val.replace("Z", "+00:00"))
     except Exception:
         pass
 
-    # 3) any 'YYYY-MM-DD' inside the string (e.g. '13:00:53 PDT 2025-10-31')
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", val)
     if m:
         y, mo, d = map(int, m.groups())
@@ -208,26 +152,22 @@ def _extract_row_datetime(row: dict, kind: str):
         except Exception:
             pass
 
-    # 4) US-style 'MM/DD/YYYY' or 'M/D/YY'
     m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", val)
     if m:
         mo, d, y = map(int, m.groups())
-        if y < 100:  # '25' -> 2025
+        if y < 100:
             y += 2000
         try:
             return datetime(y, mo, d)
         except Exception:
             pass
 
-    # if we get here, we couldn't parse it
     return None
 
 
 def _aggregate_rows_by_site(files_with_sites, kind: str, year: int, month: int) -> dict[str, int]:
     """files_with_sites: List[Tuple[path, site_name_or_None]]"""
-    import csv
     from collections import defaultdict
-    from pathlib import Path
 
     counts = defaultdict(int)
     for path, site_name in (files_with_sites or []):
@@ -242,27 +182,8 @@ def _aggregate_rows_by_site(files_with_sites, kind: str, year: int, month: int) 
                     if dt.year == year and dt.month == month:
                         counts[site] += 1
         except Exception:
-            # ignore unreadable files
             pass
     return dict(counts)
-
-# ---------------- public API: messages ----------------
-
-
-def _recalc_totals(inv: Dict[str, Any]) -> None:
-    """Recalculate amounts and totals in-place."""
-    items: List[Dict[str, Any]] = inv.get("line_items", [])
-    subtotal = 0.0
-    for it in items:
-        qty = float(it.get("qty", 0))
-        price = float(it.get("unit_price", 0))
-        it["amount"] = round(qty * price, 2)
-        subtotal += it["amount"]
-    inv.setdefault("totals", {})
-    inv["totals"]["subtotal"] = round(subtotal, 2)
-    tax_rate = float(inv.get("tax_rate", 0.0))
-    inv["totals"]["tax"] = round(subtotal * tax_rate, 2)
-    inv["totals"]["total"] = round(inv["totals"]["subtotal"] + inv["totals"]["tax"], 2)
 
 
 # ---------- settings (remember user's chosen folder) ----------
@@ -281,7 +202,6 @@ def _save_settings(d: Dict[str, Any]) -> None:
 
 
 def get_remembered_invoice_root() -> Optional[Path]:
-    """Return the remembered user invoice root, if any and still valid."""
     s = _load_settings()
     p = s.get("invoice_root")
     if not p:
@@ -297,25 +217,14 @@ def set_remembered_invoice_root(path: Path) -> None:
 
 
 def ensure_invoice_root(parent: Optional[object] = None) -> Optional[Path]:
-    """
-    Ensure a user-visible folder exists for saving/exporting invoices.
-    - If a remembered folder exists, return it.
-    - Otherwise prompt to create the default folder (~/Baymaxx Invoices).
-    - If declined, let the user pick a folder via directory dialog.
-    Returns the chosen/created Path, or None if the user cancels.
-    NOTE: `parent` can be a Tk widget/root; prompts are silent if Tk is absent.
-    """
-    # 1) already remembered?
     remembered = get_remembered_invoice_root()
     if remembered:
         return remembered
 
-    # If the default already exists, use it and remember.
     if DEFAULT_USER_INVOICE_ROOT.exists():
         set_remembered_invoice_root(DEFAULT_USER_INVOICE_ROOT)
         return DEFAULT_USER_INVOICE_ROOT
 
-    # Try to prompt via Tk if available
     askyesno = None
     askdirectory = None
     try:
@@ -323,12 +232,10 @@ def ensure_invoice_root(parent: Optional[object] = None) -> Optional[Path]:
         askyesno = messagebox.askyesno
         askdirectory = filedialog.askdirectory
     except Exception:
-        # non-GUI environment; create default automatically
         DEFAULT_USER_INVOICE_ROOT.mkdir(parents=True, exist_ok=True)
         set_remembered_invoice_root(DEFAULT_USER_INVOICE_ROOT)
         return DEFAULT_USER_INVOICE_ROOT
 
-    # 2) Ask to create default folder
     create = askyesno(
         "Create Invoices Folder",
         f"Baymaxx needs a place to save invoices.\n\n"
@@ -339,23 +246,20 @@ def ensure_invoice_root(parent: Optional[object] = None) -> Optional[Path]:
             DEFAULT_USER_INVOICE_ROOT.mkdir(parents=True, exist_ok=True)
             set_remembered_invoice_root(DEFAULT_USER_INVOICE_ROOT)
             return DEFAULT_USER_INVOICE_ROOT
-        except Exception as e:
-            # fallback: let user choose
+        except Exception:
             pass
 
-    # 3) Let the user pick a different folder
     chosen = askdirectory(
         title="Choose a folder to save invoices",
         initialdir=str(Path.home())
     )
     if not chosen:
-        return None  # user cancelled
+        return None
 
     chosen_path = Path(chosen)
     try:
         chosen_path.mkdir(parents=True, exist_ok=True)
     except Exception:
-        # If cannot create, bail
         return None
 
     set_remembered_invoice_root(chosen_path)
@@ -363,50 +267,16 @@ def ensure_invoice_root(parent: Optional[object] = None) -> Optional[Path]:
 
 
 def invoice_output_dir() -> Path:
-    """
-    Return the active user-visible invoices folder (guaranteed to exist).
-    If none is remembered, returns DEFAULT_USER_INVOICE_ROOT (creating it).
-    This is safe to call in non-GUI contexts.
-    """
     p = get_remembered_invoice_root()
     if p:
         return p
-    # Non-GUI auto-create
     DEFAULT_USER_INVOICE_ROOT.mkdir(parents=True, exist_ok=True)
     set_remembered_invoice_root(DEFAULT_USER_INVOICE_ROOT)
     return DEFAULT_USER_INVOICE_ROOT
 
-from datetime import date  # you already import this near the top
 
 def _ensure_out_dir_for_invoice(inv: Dict[str, Any], out_dir: str | Path | None) -> Path:
-    """Resolve and create the output directory for a given invoice.
-
-    If *out_dir* is provided, use it as-is.
-    Otherwise create a dated subfolder under the remembered invoice_output_dir(),
-    e.g. "Monthly 11-19-2025".
-    """
-    if out_dir is not None:
-        path = Path(out_dir)
-    else:
-        root = invoice_output_dir()
-        inv_type = str(inv.get("type") or "invoice").capitalize()
-        today_str = date.today().strftime("%m-%d-%Y")
-        folder_name = f"{inv_type} {today_str}"
-        path = root / folder_name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _ensure_out_dir_for_invoice(inv: Dict[str, Any], out_dir: str | Path | None) -> Path:
-    """Resolve and create the output directory for a given invoice.
-
-    If out_dir is provided, that path is used.
-    Otherwise we create a subfolder under the remembered invoice root in the form:
-
-        "<Type> MM-DD-YYYY"
-
-    For example: "Monthly 11-19-2025".
-    """
+    """Resolve and create the output directory for a given invoice."""
     if out_dir is not None:
         out_path = Path(out_dir)
     else:
@@ -420,7 +290,6 @@ def _ensure_out_dir_for_invoice(inv: Dict[str, Any], out_dir: str | Path | None)
     return out_path
 
 
-
 # ---------- invoice API ----------
 def new_monthly_invoice(
     year: int,
@@ -429,36 +298,20 @@ def new_monthly_invoice(
     client_name_snapshot: str | None = None,
     tax_rate: float = 0.0,
 ) -> Dict[str, Any]:
-    """
-    Create an in-memory invoice dict for a monthly period.
-    (Not saved until you call save_invoice().)
-    """
     _ensure_dirs()
     inv: Dict[str, Any] = {
         "id": _new_id(),
         "type": "monthly",
-        "period": {"year": int(year), "month": int(month)},  # 1..12
+        "period": {"year": int(year), "month": int(month)},
         "client_id": client_id,
         "client_name_snapshot": client_name_snapshot,
-        "created_at": None,      # you can fill timestamps later
+        "created_at": None,
         "tax_rate": float(tax_rate),
-        "line_items": [],        # [{description, qty, unit_price, amount}]
+        "line_items": [],
         "totals": {"subtotal": 0.0, "tax": 0.0, "total": 0.0},
         "notes": "",
     }
     return inv
-
-
-def add_line_item(inv: Dict[str, Any], description: str, qty: float, unit_price: float) -> None:
-    """Append a line item and recalc totals."""
-    inv.setdefault("line_items", [])
-    inv["line_items"].append({
-        "description": description.strip(),
-        "qty": float(qty),
-        "unit_price": float(unit_price),
-        "amount": 0.0,  # computed below
-    })
-    _recalc_totals(inv)
 
 
 def set_client(inv: Dict[str, Any], client_id: str, client_name_snapshot: str) -> None:
@@ -468,26 +321,20 @@ def set_client(inv: Dict[str, Any], client_id: str, client_name_snapshot: str) -
 
 def set_tax_rate(inv: Dict[str, Any], tax_rate: float) -> None:
     inv["tax_rate"] = float(tax_rate)
-    _recalc_totals(inv)
+    recompute_totals(inv)
 
 
 def save_invoice(inv: Dict[str, Any]) -> Path:
-    """
-    Persist the invoice as data/invoices/<id>.json (atomic write).
-    Returns the internal data path.
-    (Use invoice_output_dir() for the user-visible folder when exporting.)
-    """
     _ensure_dirs()
     if not inv.get("id"):
         inv["id"] = _new_id()
-    _recalc_totals(inv)
+    recompute_totals(inv)
     path = INVOICES_DIR / f"{inv['id']}.json"
     _atomic_write_text(path, json.dumps(inv, indent=2, ensure_ascii=False) + "\n")
     return path
 
 
 def load_invoice(invoice_id: str) -> Dict[str, Any] | None:
-    """Load a single invoice by id."""
     path = INVOICES_DIR / f"{invoice_id}.json"
     if not path.exists():
         return None
@@ -495,15 +342,9 @@ def load_invoice(invoice_id: str) -> Dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    
-def delete_invoice(invoice_id: str) -> bool:
-    """
-    Delete a single invoice JSON from data/invoices/<id>.json.
 
-    Returns True if the file existed and was removed, False otherwise.
-    (For now we only remove the internal JSON; exported CSV/PDF files
-    in the user-facing invoices folder are left alone.)
-    """
+
+def delete_invoice(invoice_id: str) -> bool:
     path = INVOICES_DIR / f"{invoice_id}.json"
     if not path.exists():
         return False
@@ -514,11 +355,7 @@ def delete_invoice(invoice_id: str) -> bool:
         return False
 
 
-
 def list_invoices() -> List[Dict[str, Any]]:
-    """
-    Return a lightweight listing of invoices (id, type, period, client, total).
-    """
     _ensure_dirs()
     out: List[Dict[str, Any]] = []
     for p in sorted(INVOICES_DIR.glob("*.json")):
@@ -533,43 +370,63 @@ def list_invoices() -> List[Dict[str, Any]]:
                 "total": (doc.get("totals") or {}).get("total", 0.0),
             })
         except Exception:
-            # skip corrupt files
             continue
     return out
 
 
 # ---------- CSV helpers (kind + source number) ----------
 def _norm(s: str) -> str:
-    """Normalize header names: lowercase + strip spaces/underscores/dashes."""
     return re.sub(r"[\s_\-]+", "", (s or "").strip().lower())
 
 
 def _detect_kind(fieldnames: List[str]) -> str:
     """
-    Decide 'messages' vs 'calls' using explicit columns:
-      - messages if a 'NumSegments' column exists
-      - calls     if a 'Duration'   column exists
-    If both or neither are present, return 'unknown'.
+    Decide 'messages' vs 'calls' using Twilio-ish headers.
+
+    Heuristics:
+      - Messages if we see NumSegments (or close variants) or other SMS/Messages markers.
+      - Calls if we see Duration, Start/End Time, CallSid, AnsweredBy, etc.
+      - If both appear, prefer calls when any duration-like header is present,
+        otherwise prefer messages when NumSegments is present.
     """
     if not fieldnames:
         return "unknown"
 
     normalized = {_norm(h) for h in fieldnames}
-    has_numsegments = "numsegments" in normalized or "numofsegments" in normalized
-    has_duration = "duration" in normalized
 
-    if has_numsegments and not has_duration:
-        return "messages"
-    if has_duration and not has_numsegments:
+    # message indicators
+    msg_tokens = (
+        "numsegments", "numofsegments", "sentdate", "messagedate", "smsstatus",
+        "messagingservice", "message", "body"
+    )
+    has_msg = any(any(tok in h for tok in msg_tokens) for h in normalized)
+
+    # call indicators
+    call_tokens = (
+        "duration", "starttime", "endtime", "calldate", "callsid", "answeredby",
+        "callstatus", "call", "price"
+    )
+    has_call = any(any(tok in h for tok in call_tokens) for h in normalized)
+
+    # strongest signals
+    has_numsegments = any(("numsegments" in h) or ("numofsegments" in h) for h in normalized)
+    has_duration = any("duration" in h for h in normalized)
+
+    if has_duration:
         return "calls"
+    if has_numsegments:
+        return "messages"
+
+    if has_call and not has_msg:
+        return "calls"
+    if has_msg and not has_call:
+        return "messages"
+
     return "unknown"
 
 
+
 def sniff_csv(path: str | Path) -> Tuple[str, List[str]]:
-    """
-    Read the header of a CSV and return (kind, headers).
-    kind ∈ {'messages','calls','unknown'} based on headers present.
-    """
     p = Path(path)
     with p.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f)
@@ -578,7 +435,6 @@ def sniff_csv(path: str | Path) -> Tuple[str, List[str]]:
 
 
 def _clean_phone(raw: str) -> str:
-    """Normalize a phone string to digits with optional leading '+'."""
     if not raw:
         return ""
     raw = raw.strip()
@@ -588,19 +444,22 @@ def _clean_phone(raw: str) -> str:
 
 
 def identify_source(path: str | Path) -> Dict[str, Any]:
-    """
-    Inspect a CSV file to determine:
-      - kind: 'messages' or 'calls' (or 'unknown')
-      - raw_number: value from the 'From' column (first non-empty in file)
-      - number: normalized phone
-    """
     p = Path(path)
     kind, headers = sniff_csv(p)
 
-    # Find the "From" column (allow variants)
-    candidate_names = {"from", "sender", "source", "callerid", "caller"}
-    header_index = None
     normalized = [_norm(h) for h in headers]
+
+    # Priority columns for extracting the Twilio/site number
+    if kind == "calls":
+        candidate_names = [
+            "to", "called", "destination",   # often your Twilio number
+            "from", "callerid", "caller",    # fallback
+            "sender", "source"
+        ]
+    else:
+        candidate_names = ["from", "sender", "source", "callerid", "caller"]
+
+    header_index = None
     for i, hn in enumerate(normalized):
         if hn in candidate_names:
             header_index = i
@@ -610,7 +469,7 @@ def identify_source(path: str | Path) -> Dict[str, Any]:
     if header_index is not None:
         with p.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.reader(f)
-            next(reader, None)  # skip header
+            next(reader, None)
             for row in reader:
                 if header_index < len(row):
                     raw = row[header_index].strip()
@@ -619,112 +478,24 @@ def identify_source(path: str | Path) -> Dict[str, Any]:
                         break
 
     return {
-        "kind": kind,                  # 'messages' | 'calls' | 'unknown'
-        "raw_number": raw_number,      # as seen in CSV
-        "number": _clean_phone(raw_number),  # normalized
-        "headers": headers,            # actual header row
+        "kind": kind,
+        "raw_number": raw_number,
+        "number": _clean_phone(raw_number),
+        "headers": headers,
     }
-# --- add near the top ---
-from datetime import date, datetime
-
-# ... keep your existing code above this line ...
 
 
-# ---------- export naming helpers ----------
-def monthly_filename_for_today() -> str:
-    """
-    Return a safe filename like '2025-10-15 Monthly.json'.
-    (No slashes so it works on Windows/macOS/Linux.)
-    """
-    today = date.today()
-    return f"{today:%Y-%m-%d} Monthly.json"
-
-
-def monthly_output_path(root: Path | None = None) -> Path:
-    """
-    Return the full path to save a monthly invoice JSON under the user's invoice root.
-    Ensures the root exists.
-    """
-    root = (root or invoice_output_dir())
-    root.mkdir(parents=True, exist_ok=True)
-    return root / monthly_filename_for_today()
-
-
-# ---------- phone matching across clients/divisions/sites ----------
-def _match_phone_in_clients(clients_doc: Dict[str, Any], number: str) -> Dict[str, Any] | None:
-    """
-    Given the loaded clients.json-like document and a normalized number,
-    find a site whose phone matches. Returns a breadcrumb dict or None.
-    Expected structure:
-      {"clients":[
-          {"id":.., "name":.., "divisions":[
-              {"id":.., "name":.., "sites":[
-                  {"id":.., "name":.., "phone":..}, ...
-              ]}]}]}
-    """
-    if not number:
-        return None
-
-    for c in (clients_doc.get("clients") or []):
-        if not isinstance(c, dict):
-            continue
-        cid, cname = c.get("id"), c.get("name", "")
-        for d in (c.get("divisions") or []):
-            if not isinstance(d, dict):
-                continue
-            did, dname = d.get("id"), d.get("name", "")
-            for s in (d.get("sites") or []):
-                if not isinstance(s, dict):
-                    continue
-                sid, sname = s.get("id"), s.get("name", "")
-                phone_norm = _clean_phone(s.get("phone", ""))
-                if phone_norm and phone_norm == number:
-                    return {
-                        "client_id": cid, "client_name": cname,
-                        "division_id": did, "division_name": dname,
-                        "site_id": sid, "site_name": sname,
-                    }
-    return None
-
-
-# ---------- CSV wrapper expected by the UI ----------
-def identify_csv_and_phone(path: str | Path, clients_doc: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Wrapper used by the UI. Detects file kind + source phone and
-    tries to match it to a client/division/site.
-    Returns:
-      {
-        "kind": "messages" | "calls" | "unknown",
-        "phone": "+15551234567",
-        "match": {client_id/name, division_id/name, site_id/name} | None
-      }
-    """
-    src = identify_source(path)             # {kind, raw_number, number, headers}
-    number = src.get("number", "")
-    match = _match_phone_in_clients(clients_doc or {}, number) if number else None
-    return {
-        "kind": src.get("kind", "unknown"),
-        "phone": number,
-        "match": match
-    }
 
 # ---------- matching helpers (CSV -> site by last-4) ----------
-
 def _digits_only(s: str) -> str:
     return re.sub(r"\D+", "", s or "")
 
+
 def _match_site_by_last4(clients_doc, phone_digits: str) -> dict | None:
-    """
-    Find a site whose phone ends with the last 4 digits of `phone_digits`.
-    Works with the current clients.json structure:
-      client -> divisions[] -> sites[] (each site has 'phone').
-    Returns a small breadcrumb dict or None.
-    """
     if not phone_digits:
         return None
     last4 = phone_digits[-4:]
 
-    # clients_doc may be a dict {"clients":[...]} or a list [...]
     candidates = clients_doc.get("clients") if isinstance(clients_doc, dict) else clients_doc
     if not isinstance(candidates, list):
         return None
@@ -748,13 +519,8 @@ def _match_site_by_last4(clients_doc, phone_digits: str) -> dict | None:
                     }
     return None
 
+
 def identify_csv_and_phone(path: str | Path, clients_doc=None) -> dict:
-    """
-    Convenience for the UI:
-    - detect kind ('messages' | 'calls' | 'unknown')
-    - pull 'From' number
-    - try to match by last-4 digits to a site (if clients_doc provided)
-    """
     base = identify_source(path)
     phone_digits = _digits_only(base.get("number") or base.get("raw_number") or "")
     match = _match_site_by_last4(clients_doc, phone_digits) if clients_doc else None
@@ -762,18 +528,13 @@ def identify_csv_and_phone(path: str | Path, clients_doc=None) -> dict:
     return {
         "kind": base.get("kind", "unknown"),
         "phone": phone_digits,
-        "match": match,         # dict | None
+        "match": match,
         "headers": base.get("headers", []),
     }
+
+
 # ---------- month/year validation for CSVs ----------
 def _ym_from_any_date(s: str) -> tuple[int | None, int | None]:
-    """
-    Extract (year, month) from any date-time-ish string by regexing 'YYYY-MM-DD'.
-    Works for:
-      - '2025-05-31T20:26:26-07:00'
-      - '13:00:35 PDT 2025-05-31'
-    Returns (None, None) if not found.
-    """
     if not s:
         return (None, None)
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
@@ -785,11 +546,6 @@ def _ym_from_any_date(s: str) -> tuple[int | None, int | None]:
 
 
 def check_csv_month_year(path: str | Path, kind: str, year: int, month: int) -> tuple[bool, dict]:
-    """
-    Scan the CSV and check if *all* rows fall within the given (year, month).
-    kind: 'messages' or 'calls' (anything else -> unknown -> False)
-    Returns (all_ok, stats) where stats = {'in': n_in, 'out': n_out, 'rows': n_total}
-    """
     p = Path(path)
     try:
         with p.open("r", encoding="utf-8-sig", newline="") as f:
@@ -797,12 +553,9 @@ def check_csv_month_year(path: str | Path, kind: str, year: int, month: int) -> 
             headers = next(reader, [])
             norm = [_norm(h) for h in headers]
 
-            # choose the date column based on file kind
             if kind == "messages":
-                # e.g., "SentDate"
                 candidates = {"sentdate", "date", "timestamp"}
             elif kind == "calls":
-                # e.g., "Start Time"
                 candidates = {"starttime", "start", "calldate"}
             else:
                 return (False, {"in": 0, "out": 0, "rows": 0})
@@ -813,7 +566,6 @@ def check_csv_month_year(path: str | Path, kind: str, year: int, month: int) -> 
                     idx = i
                     break
             if idx is None:
-                # can't find a date column -> fail safe
                 return (False, {"in": 0, "out": 0, "rows": 0})
 
             n_in = n_out = n_total = 0
@@ -829,93 +581,185 @@ def check_csv_month_year(path: str | Path, kind: str, year: int, month: int) -> 
         return (n_out == 0 and n_total > 0, {"in": n_in, "out": n_out, "rows": n_total})
     except Exception:
         return (False, {"in": 0, "out": 0, "rows": 0})
-# ---------- month/year row finder for preview highlighting ----------
 
 
-# ------------------ compat shims (safe to add once) ------------------
+# ======================================================================
+# Kind + description helpers (canonical)
+# ======================================================================
 
-# If your file doesn't define UNIT_PRICE_SMS, default it here
-try:
-    UNIT_PRICE_SMS
-except NameError:
-    UNIT_PRICE_SMS = 0.14  # adjust if your SMS price is different
+_KIND_TOKENS = ("VOICE", "SMS")
 
-# If your aggregator is exported without a leading underscore, alias it
-if '_aggregate_rows_by_site' not in globals() and 'aggregate_rows_by_site' in globals():
-    def _aggregate_rows_by_site(files_with_sites, kind, year, month):
-        return aggregate_rows_by_site(files_with_sites, kind, year, month)
+def _normalize_kind(kind: str | None) -> str | None:
+    if not kind:
+        return None
+    k = str(kind).strip().upper()
+    if k in _KIND_TOKENS:
+        return k
+    if "CALL" in k or "VOICE" in k:
+        return "VOICE"
+    if "MSG" in k or "SMS" in k or "TEXT" in k:
+        return "SMS"
+    return None
 
-# If your add/recompute helpers are exported without underscores, alias them
-if '_add_item' not in globals() and 'add_item' in globals():
-    def _add_item(*a, **k):
-        return add_item(*a, **k)
+def make_site_description(site_name: str, kind: str | None) -> str:
+    name = (site_name or "").strip()
+    k = _normalize_kind(kind)
 
-if '_recompute_totals' not in globals() and 'recompute_totals' in globals():
-    def _recompute_totals(*a, **k):
-        return recompute_totals(*a, **k)
+    upper_name = name.upper()
+    if re.search(r"\b(VOICE|SMS)\b\s*$", upper_name):
+        return name
 
-# ------------------ phone-resolution helpers ------------------
+    if k:
+        return f"{name} {k}".strip()
+
+    return name
 
 
+# ---------- export naming helpers ----------
+def monthly_filename_for_today() -> str:
+    today = date.today()
+    return f"{today:%Y-%m-%d} Monthly.json"
+
+
+def monthly_output_path(root: Path | None = None) -> Path:
+    root = (root or invoice_output_dir())
+    root.mkdir(parents=True, exist_ok=True)
+    return root / monthly_filename_for_today()
+
+
+# ---------- Excel template → PDF export helpers ----------
+@functools.lru_cache(maxsize=1)
+def _load_clients_doc() -> dict:
+    try:
+        here = Path(__file__).resolve().parent
+        clients_path = here / "data" / "clients.json"
+        with clients_path.open("r", encoding="utf-8") as f:
+            doc = json.load(f)
+        return doc or {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print("WARNING: could not load clients.json for site ordering:", e)
+        return {}
+
+def _find_client_address(clients_doc: dict, name_snapshot: str | None) -> list[str]:
+    if not name_snapshot:
+        return []
+    items = clients_doc.get("clients") or clients_doc.get("items") or []
+    for c in items:
+        if (c.get("name") or "").strip() == name_snapshot.strip():
+            addr = (c.get("address") or "").strip()
+            lines = [name_snapshot]
+            if addr:
+                for line in addr.splitlines():
+                    if line.strip():
+                        lines.append(line.strip())
+            return lines[:3]
+    return [name_snapshot]
+
+
+# ---------- ordering helpers ----------
+def _iter_sites_in_clients_order(clients_doc: dict):
+    for client in (clients_doc.get("clients") or []):
+        for div in (client.get("divisions") or []):
+            for site in (div.get("sites") or []):
+                name = (site.get("name") or "").strip()
+                if name:
+                    yield name
+
+
+def _ordered_site_items(by_site: dict[str, int]) -> list[tuple[str, int]]:
+    clients_doc = _load_clients_doc()
+
+    ordered: list[tuple[str, int]] = []
+    used: set[str] = set()
+
+    for site_name in _iter_sites_in_clients_order(clients_doc):
+        if site_name in by_site:
+            ordered.append((site_name, by_site[site_name]))
+            used.add(site_name)
+
+    leftovers = sorted(k for k in by_site.keys() if k not in used)
+    for site_name in leftovers:
+        ordered.append((site_name, by_site[site_name]))
+
+    return ordered
+
+
+# ---------- phone matching / decorator helpers ----------
 def _build_priority_phone_map(inv: dict) -> dict[str, str]:
-    """
-    Merge phones from inv['site_phones'] (UI-harvested) with clients.json,
-    returning NAME(normalized)->'last4'.
-    """
     phones: dict[str, str] = {}
 
-    # 1) UI-provided site phones from the match column
-    sp = inv.get('site_phones') or {}
-    if isinstance(sp, dict):
-        for name, last4 in sp.items():
-            if last4 and str(last4).isdigit() and len(str(last4)) == 4:
-                phones[_normalize_site_key(name)] = str(last4)
+    # 1) from invoice data (highest priority)
+    try:
+        sp = inv.get("site_phones")
+        if isinstance(sp, dict):
+            for raw_name, v in sp.items():
+                if not raw_name or not v:
+                    continue
+                last4 = str(v)[-4:]
+                phones[raw_name] = last4
+                try:
+                    nk = _normalize_site_key(raw_name)
+                    phones.setdefault(nk, last4)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
-    # 2) Clients.json (if your loader exists)
-    load_clients = (globals().get('_load_clients_doc') or
-                    globals().get('load_clients_doc'))
-    clients_doc = None
-    if callable(load_clients):
-        try:
-            # Some codebases take an optional path arg; others take none
-            clients_doc = load_clients(inv.get('clients_path'))
-        except TypeError:
-            clients_doc = load_clients()
-    if isinstance(clients_doc, dict):
-        for c in (clients_doc.get('clients') or []):
-            for s in (c.get('sites') or []):
-                nm = (s.get('name') or '').strip()
-                ph = (s.get('phone') or '').strip()
-                if nm and ph.isdigit() and len(ph) == 4:
-                    phones.setdefault(_normalize_site_key(nm), ph)
+    # 2) from clients.json (fallback)
+    try:
+        clients_doc = _load_clients_doc()
+        items = clients_doc.get("clients") or clients_doc.get("items") or []
+        for c in items:
+            for d in c.get("divisions", []) or []:
+                for s in d.get("sites", []) or []:
+                    raw_name = (s.get("name") or "").strip()
+                    raw_phone = s.get("phone") or ""
+                    digits = _digits_only(raw_phone)
+                    if raw_name and digits:
+                        last4 = digits[-4:]
+                        phones.setdefault(raw_name, last4)
+                        try:
+                            nk = _normalize_site_key(raw_name)
+                            phones.setdefault(nk, last4)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
 
     return phones
 
+
 def _lookup_last4(phones: dict[str, str], desc: str) -> str | None:
-    """Resolve the 4-digit phone for a given line-item description."""
     if not desc:
         return None
     key = _normalize_site_key(desc)
     return phones.get(key)
 
 
+# ======================================================================
+# Voice invoice helpers
+# ======================================================================
 
+UNIT_PRICE_VOICE = 0.14  # USD per call (flat), per user spec
+
+def _normalize_headers(headers: list[str]) -> list[str]:
+    return [re.sub(r"[\s_\-]+", "", (h or "").strip().lower()) for h in headers]
 
 def _date_col_index(headers: list[str], kind: str) -> int | None:
     """Return index of the date column we should check for this kind."""
     norm = lambda s: re.sub(r"[\s_\-]+", "", s.strip().lower())
     normed = [norm(h) for h in headers]
     if kind == "messages":
-        # Twilio uses 'SentDate'
-        targets = {"sentdate"}
+        targets = {"sentdate", "date", "timestamp"}
     elif kind == "calls":
-        # Twilio uses 'Start Time'
-        targets = {"starttime"}
+        targets = {"starttime", "start", "calldate"}
     else:
         targets = set()
 
     for i, n in enumerate(normed):
-        if n in targets:
+        if any(t in n for t in targets):
             return i
     return None
 
@@ -923,7 +767,6 @@ def _date_col_index(headers: list[str], kind: str) -> int | None:
 _date_re = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
 def _ym_from_cell(cell: str) -> tuple[int | None, int | None]:
-    """Extract (year, month) from a cell by regex like 'YYYY-MM-DD'."""
     if not cell:
         return (None, None)
     m = _date_re.search(cell)
@@ -935,86 +778,15 @@ def _ym_from_cell(cell: str) -> tuple[int | None, int | None]:
     except Exception:
         return (None, None)
 
-
-def find_out_of_month_rows(path: str | Path, kind: str, year: int, month: int) -> list[tuple[int, str]]:
-    """
-    Return a list of (row_number, cell_value) for rows whose date is NOT in (year, month).
-    row_number is 1-based counting the header as row 1 (so first data row is 2).
-    """
-    p = Path(path)
-    try:
-        with p.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.reader(f)
-            headers = next(reader, [])
-            ci = _date_col_index(headers, kind)
-            out: list[tuple[int, str]] = []
-
-            if ci is None:
-                # No date column? mark every data row as out-of-range with reason
-                for idx, row in enumerate(reader, start=2):
-                    out.append((idx, "date-column-missing"))
-                return out
-
-            for idx, row in enumerate(reader, start=2):
-                cell = row[ci] if ci < len(row) else ""
-                y, m = _ym_from_cell(cell)
-                if y is None or m is None or y != int(year) or m != int(month):
-                    out.append((idx, cell))
-            return out
-    except Exception:
-        # On any read error, just say everything is bad so the UI warns the user
-        try:
-            # best-effort to count rows for user feedback
-            with p.open("r", encoding="utf-8-sig", newline="") as f2:
-                n = sum(1 for _ in f2)
-        except Exception:
-            n = 0
-        return [(i, "read-error") for i in range(2, max(2, n + 1))]
-# ---------- starting invoice number (persisted in settings) ----------
-
-def get_starting_invoice_number(default: int | None = None) -> int | None:
-    s = _load_settings()
-    val = s.get("starting_invoice_number", None)
-    if isinstance(val, int):
-        return val
-    # coerce if stored as string
-    try:
-        return int(val)
-    except Exception:
-        return default
-
-def set_starting_invoice_number(n: int | None) -> None:
-    s = _load_settings()
-    if n is None:
-        # remove it if you want “blank”
-        s.pop("starting_invoice_number", None)
-    else:
-        s["starting_invoice_number"] = int(n)
-    _save_settings(s)
-
-# ---------- Voice invoice helpers (row-count × fixed unit price) ----------
-
-UNIT_PRICE_VOICE = 0.14  # USD per call (flat), per user spec
-
-def _normalize_headers(headers: list[str]) -> list[str]:
-    return [re.sub(r"[\s_\-]+", "", (h or "").strip().lower()) for h in headers]
-
 def count_rows_calls_csv(path: str | Path, filter_year: int | None = None, filter_month: int | None = None) -> int:
-    """
-    Count rows in a Twilio *calls* CSV. If filter_year/month provided,
-    only count rows whose date cell is within that (year, month).
-    """
     p = Path(path)
     with p.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f)
         headers = next(reader, [])
         if filter_year is None or filter_month is None:
-            # Fast path: count all data rows
             return sum(1 for _ in reader)
-        # Filtered path: locate date column appropriate for 'calls'
         ci = _date_col_index(headers, "calls")
         if ci is None:
-            # If we can't find a date column, safest is count zero for filtered mode
             return 0
         n = 0
         for row in reader:
@@ -1026,15 +798,11 @@ def count_rows_calls_csv(path: str | Path, filter_year: int | None = None, filte
 
 def build_voice_line_item(site_name: str | None, qty: int, unit_price: float = UNIT_PRICE_VOICE) -> dict:
     """
-    Build a single line item dict (not yet added to invoice).
-    Description style: '{Site Name} Voice' if site provided, else 'Voice'.
-    If the site name already ends with VOICE, don't double it.
+    Build a single VOICE line item.
+    Always produce '<Site Name> VOICE' (unless site already ends with VOICE).
     """
     base = (site_name or "").strip()
-    if base.upper().endswith("VOICE"):
-        desc = base
-    else:
-        desc = f"{base} Voice" if base else "Voice"
+    desc = make_site_description(base, "VOICE") if base else "VOICE"
 
     return {
         "description": desc,
@@ -1043,14 +811,11 @@ def build_voice_line_item(site_name: str | None, qty: int, unit_price: float = U
     }
 
 
-
-from pathlib import Path as _Path
-
 def aggregate_voice_items_from_csvs(files_with_sites, year=None, month=None):
     by_site: dict[str, int] = {}
     for csv_path, site_name in files_with_sites:
         qty = count_rows_calls_csv(csv_path, year, month) if (year and month) else count_rows_calls_csv(csv_path)
-        label = site_name or _Path(csv_path).stem      # <--- use filename if no site
+        label = site_name or Path(csv_path).stem
         by_site[label] = by_site.get(label, 0) + int(qty)
 
     items: list[dict[str, Any]] = []
@@ -1059,51 +824,47 @@ def aggregate_voice_items_from_csvs(files_with_sites, year=None, month=None):
     return items
 
 
-
 def add_voice_items_to_invoice(inv: Dict[str, Any],
                                files_with_sites: list[tuple[str | Path, str | None]],
                                year: int | None = None,
                                month: int | None = None,
                                unit_price: float = UNIT_PRICE_VOICE) -> Dict[str, Any]:
     """
-    High-level helper: aggregate voice items from CSVs and append them to `inv`.
-    Decorates each description with (-LAST4) when we can infer a phone for the site.
-    Returns the modified invoice (same object).
+    Aggregate VOICE items from CSVs and append them to inv.
+
+    Important:
+    - DO NOT strip the VOICE label.
+    - DO NOT pre-append (-last4) here.
+      The PDF/template exporter will call decorate_with_last4_kind()
+      and add (-last4) while preserving VOICE.
     """
     items = aggregate_voice_items_from_csvs(files_with_sites, year, month)
-    phones = _build_priority_phone_map(inv)
+
     for it in items:
-        desc = str(it.get("description", "")).strip()
-        # strip VOICE/SMS decoration that came from the file-type
-        for suf in (" – VOICE"," – SMS"," VOICE"," SMS"):
-            if desc.endswith(suf):
-                desc = desc[:-len(suf)].strip()
-        last4 = _lookup_last4(phones, desc)
-        if last4:
-            desc = f"{desc} (-{last4})"
+        raw_desc = str(it.get("description", "")).strip()
+
+        # Ensure it has a VOICE label (but don't double-append)
+        desc = make_site_description(raw_desc, "VOICE")
+
         add_line_item(inv, desc, it.get("qty", 0), unit_price)
+
     return inv
 
 
+# ======================================================================
+# Export helpers + PDF/CSV
+# ======================================================================
 
 def invoice_filename(inv: Dict[str, Any], ext: str) -> str:
-    """Generate a human-friendly filename like Invoice-YYYY-MM-<id>.<ext>"""
     per = inv.get("period") or {}
     y = per.get("year")
     m = per.get("month")
     ym = f"{y}-{int(m):02d}" if y and m else "unknown"
     return f"Invoice-{ym}-{inv.get('id','')}.{ext.lstrip('.')}"
 
+
 def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -> Path:
-    """Export an invoice to CSV (human-friendly).
-
-    Columns: Description, Qty, Unit Price, Amount
-    with a summary of Subtotal, Tax, Total at the bottom.
-
-    If *out_dir* is not provided, files go into a dated subfolder under
-    the remembered invoice_output_dir(), e.g. "Monthly 11-19-2025".
-    """
-    _recalc_totals(inv)
+    recompute_totals(inv)
     out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
 
     csv_path = out_dir / invoice_filename(inv, "csv")
@@ -1129,16 +890,8 @@ def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     return csv_path
 
 
-
 # ---------- Simple PDF export (ReportLab) ----------
-
 def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -> Path:
-    """
-    Export the invoice as a simple PDF using reportlab (pip install reportlab).
-    Layout: header, period, table (Description, Qty, Unit Price, Amount), totals.
-    Saves into the remembered invoice folder if out_dir is None.
-    Returns the PDF path.
-    """
     try:
         from reportlab.lib.pagesizes import LETTER
         from reportlab.pdfgen import canvas
@@ -1146,17 +899,15 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     except Exception as e:
         raise RuntimeError("reportlab is required: pip install reportlab") from e
 
-    _recalc_totals(inv)
+    recompute_totals(inv)
     out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
     pdf_path = out_dir / invoice_filename(inv, "pdf")
 
-    # --- basic layout ---
     c = canvas.Canvas(str(pdf_path), pagesize=LETTER)
     width, height = LETTER
     x_margin = 0.75 * inch
     y = height - 0.75 * inch
 
-    # Header
     c.setFont("Helvetica-Bold", 16)
     c.drawString(x_margin, y, "INVOICE")
     y -= 18
@@ -1171,19 +922,16 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     c.drawString(x_margin, y, f"Invoice ID: {inv_id}")
     y -= 20
 
-    # Client snapshot if present
     snap = inv.get("client_name_snapshot", "")
     if snap:
         c.drawString(x_margin, y, f"Client: {snap}")
         y -= 16
 
-    # NEW: division label (for per-division PDFs)
     div_name = inv.get("division_name", "")
     if div_name:
         c.drawString(x_margin, y, f"Division: {div_name}")
         y -= 16
 
-    # Table header
     c.setFont("Helvetica-Bold", 10)
     col_desc_x = x_margin
     col_qty_x  = x_margin + 4.6 * inch
@@ -1213,13 +961,11 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
             c.setFont("Helvetica", 10)
 
         raw_desc = str(li.get("description", ""))
-        # Try to append (-LAST4) using your mapping helper
         try:
             desc = decorate_with_last4_kind(inv, raw_desc)
         except Exception:
             desc = raw_desc
 
-        # Quantity formatting
         qty_val = li.get("qty", 0)
         try:
             qty = str(int(round(float(qty_val))))
@@ -1255,184 +1001,110 @@ def export_invoice_pdf(inv: Dict[str, Any], out_dir: str | Path | None = None) -
     return pdf_path
 
 
+# ======================================================================
+# Decoration helpers
+# ======================================================================
 
-def _iter_sites_in_clients_order(clients_doc: dict):
-    """
-    Yield site names in the exact order they appear in clients.json:
-    client -> division -> sites[].
-    """
-    for client in (clients_doc.get("clients") or []):
-        for div in (client.get("divisions") or []):
-            for site in (div.get("sites") or []):
-                name = (site.get("name") or "").strip()
-                if name:
-                    yield name
-
-
-def _ordered_site_items(by_site: dict[str, int]) -> list[tuple[str, int]]:
-    """
-    Take a mapping {site_name: qty} and return a list of (site_name, qty)
-    in clients.json order. Any sites that *aren't* in clients.json go
-    at the end, alphabetically.
-    """
-    clients_doc = _load_clients_doc()
-
-    ordered: list[tuple[str, int]] = []
-    used: set[str] = set()
-
-    # 1) sites that exist in clients.json, in that order
-    for site_name in _iter_sites_in_clients_order(clients_doc):
-        if site_name in by_site:
-            ordered.append((site_name, by_site[site_name]))
-            used.add(site_name)
-
-    # 2) leftovers – sites that weren't in clients.json
-    leftovers = sorted(k for k in by_site.keys() if k not in used)
-    for site_name in leftovers:
-        ordered.append((site_name, by_site[site_name]))
-
-    return ordered
-
-
-# ---------- Excel template → PDF export (Windows, requires Excel) ----------
-@functools.lru_cache(maxsize=1)
-def _load_clients_doc() -> dict:
-    """
-    Load data/clients.json once and cache it.
-    """
-    try:
-        here = Path(__file__).resolve().parent
-        clients_path = here / "data" / "clients.json"
-        with clients_path.open("r", encoding="utf-8") as f:
-            doc = json.load(f)
-        return doc or {}
-    except FileNotFoundError:
-        # No clients.json – just fall back to alphabetical order later
-        return {}
-    except Exception as e:
-        # Don't crash invoicing if clients.json is weird
-        print("WARNING: could not load clients.json for site ordering:", e)
-        return {}
-
-def _find_client_address(clients_doc: dict, name_snapshot: str | None) -> list[str]:
-    """Return up to 3 lines for the client's billing block (name + address)."""
-    if not name_snapshot:
-        return []
-    # Try exact name match at top-level clients
-    items = clients_doc.get("clients") or clients_doc.get("items") or []
-    for c in items:
-        if (c.get("name") or "").strip() == name_snapshot.strip():
-            addr = (c.get("address") or "").strip()
-            lines = [name_snapshot]
-            if addr:
-                for line in addr.splitlines():
-                    if line.strip():
-                        lines.append(line.strip())
-            return lines[:3]
-    # Fallback: just the snapshot name
-    return [name_snapshot]
-
-# === BEGIN: exporter decoration helpers (idempotent) ===
 import re as _re_dec
 
-def _infer_kind_and_base(desc: str) -> tuple[str|None, str]:
-    """Strip trailing '— Voice/— SMS' variants, return (kind, base)."""
-    if not isinstance(desc, str):
-        return (None, "")
-    s = desc.strip()
-    # Common trailing junk variants
-    tails = (
-        " — Voice"," — VOICE"," – Voice"," – VOICE"," - Voice"," - VOICE",
-        " — Sms"," — SMS"," – Sms"," – SMS"," - Sms"," - SMS",
-    )
-    changed = True
-    while changed:
-        changed = False
-        for suf in tails:
-            if s.endswith(suf):
-                s = s[:-len(suf)].rstrip()
-                changed = True
-    up = s.upper()
-    if up.endswith(" SMS"):
-        return "SMS", s[:-3].rstrip()
-    if up.endswith(" VOICE"):
-        return "VOICE", s[:-5].rstrip()
-    return None, s
+def _infer_kind_and_base(desc: str) -> tuple[str | None, str]:
+    d = (desc or "").strip()
+    up = d.upper()
+
+    m = re.search(r"\b(VOICE|SMS)\b\s*$", up)
+    if m:
+        kind = m.group(1)
+        base = re.sub(r"\b(VOICE|SMS)\b\s*$", "", up).strip()
+        return kind, base
+
+    has_voice = re.search(r"\bVOICE\b", up) is not None
+    has_sms   = re.search(r"\bSMS\b", up) is not None
+
+    if has_voice and not has_sms:
+        kind = "VOICE"
+    elif has_sms and not has_voice:
+        kind = "SMS"
+    else:
+        kind = None
+
+    base = re.sub(r"\b(VOICE|SMS)\b", "", up).strip()
+    return kind, base
+
 
 def _phones_map_from_inv(inv: dict) -> dict[str, str]:
-    """Combine your _build_priority_phone_map and inv['site_phones']; normalize to last-4."""
     phones: dict[str, str] = {}
+    sp = inv.get("site_phones") or {}
+    if isinstance(sp, dict):
+        for raw_name, raw_val in sp.items():
+            if not raw_name or raw_val is None:
+                continue
+            last4 = str(raw_val)[-4:]
+            if not last4:
+                continue
+            phones[raw_name] = last4
+            try:
+                nk = _normalize_site_key(raw_name)
+            except Exception:
+                nk = None
+            if nk:
+                phones.setdefault(nk, last4)
+
     try:
-        bpm = globals().get("_build_priority_phone_map")
-        if callable(bpm):
-            pm = bpm(inv) or {}
-            for k, v in pm.items():
-                if k:
-                    phones[k] = str(v or "")[-4:]
+        pm = _build_priority_phone_map(inv) or {}
+        for raw_name, raw_val in pm.items():
+            if not raw_name or raw_val is None:
+                continue
+            last4 = str(raw_val)[-4:]
+            if not last4:
+                continue
+            phones.setdefault(raw_name, last4)
+            try:
+                nk = _normalize_site_key(raw_name)
+                phones.setdefault(nk, last4)
+            except Exception:
+                pass
     except Exception:
         pass
-    if not phones and isinstance(inv.get("site_phones"), dict):
-        for k, v in inv["site_phones"].items():
-            if k and v:
-                phones[k] = str(v)[-4:]
+
     return phones
 
-def decorate_with_last4_kind(inv: dict, desc: str) -> str:
-    """
-    Return description with (-LAST4) when resolvable.
 
-    Strategy:
-      - Parse out a KIND ('VOICE'/'SMS') and a base site name.
-      - If the description already ends with '(-dddd)', leave it alone.
-      - If the base is just 'Voice' or 'SMS' (no site name), DO NOT decorate.
-      - Otherwise try:
-          1) exact match on '<base> KIND'
-          2) exact match on '<base>'
-          3) longest substring match against known site names
-    """
-    # nothing to do if it's not a real string
+def decorate_with_last4_kind(inv: dict, desc: str) -> str:
     if not isinstance(desc, str) or not desc.strip():
         return desc
 
-    # already has (-1234) at the end
     if _re_dec.search(r"\(-\d{3,4}\)\s*$", desc):
         return desc
 
     kind, base = _infer_kind_and_base(desc)
-
-    # no base text at all
     if not base:
         return desc
 
-    # 🚫 generic 'Voice' / 'SMS' only (no site name) should never be decorated
-    #   e.g. "Voice", "SMS", "voice", "sms"
     if base.upper() in {"VOICE", "SMS"} and " " not in base.strip():
         return desc
 
     phones = _phones_map_from_inv(inv)
 
-    # 1) exact base+kind, then base
-    for key in ([f"{base} {kind}"] if kind else []) + [base]:
+    candidates: list[str] = []
+    candidates.append(desc)
+    if kind:
+        candidates.append(f"{base} {kind}")
+    candidates.append(base)
+
+    for key in candidates:
         last4 = phones.get(key)
         if last4:
-            return f"{base} (-{str(last4)[-4:]})"
+            last4 = str(last4)[-4:]
+            label = f"{base} {kind}" if kind else base
+            return f"{label} (-{last4})"
 
-    # 2) longest substring match as a last resort
-    target = (f"{base} {kind}" if kind else base).upper()
-    best_k, best_len = None, -1
-    for k in phones.keys():
-        ku = str(k).upper()
-        if ku in target or target in ku:
-            if len(ku) > best_len:
-                best_k, best_len = k, len(ku)
+    return desc
 
-    if best_k and phones.get(best_k):
-        return f"{base} (-{phones[best_k][-4:]})"
 
-    # couldn't resolve a phone – return undecorated base text
-    return base
-
-# ---------- QuickBooks "master" invoicing.csv export ----------
+# ======================================================================
+# QuickBooks export + division PDFs + template PDF
+# (UNCHANGED from your version except for relying on fixed descriptions)
+# ======================================================================
 
 _QB_HEADER = [
     "*InvoiceNo",
@@ -1452,14 +1124,12 @@ _QB_HEADER = [
 
 
 def _last_day_of_month(year: int, month: int) -> date:
-    """Return last day of (year, month)."""
     import calendar
     last = calendar.monthrange(year, month)[1]
     return date(year, month, last)
 
 
 def _fmt_us_date(d: date) -> str:
-    """QuickBooks-style m/d/yyyy."""
     return f"{d.month}/{d.day}/{d.year}"
 
 
@@ -1467,11 +1137,6 @@ def _build_site_division_index_for_client(
     clients_doc: dict,
     client_name: str | None,
 ) -> tuple[list[str], dict[str, tuple[str, int, int]]]:
-    """
-    For the given client name, build:
-      - ordered list of division names
-      - map: normalized_site_key -> (division_name, div_index, site_index)
-    """
     if not client_name:
         return ([], {})
 
@@ -1503,25 +1168,12 @@ def _build_site_division_index_for_client(
 
     return (div_order, site_map)
 
-from datetime import date
 
 def export_quickbooks_invoicing_csv(
     inv: Dict[str, Any],
     out_dir: str | Path | None = None,
     csv_name: str = "invoicing.csv",
 ) -> Path:
-    """
-    Build a QuickBooks-compatible 'invoicing.csv' file:
-
-    * One invoice per DIVISION.
-    * Invoice number starts from inv['starting_invoice_number'].
-    * Invoice number only increments when a NEW division is encountered.
-    * Within a division, all rows share the same invoice number.
-
-    The header row matches your sample exactly.
-    """
-
-    # ----- basics from the invoice dict -----
     period = inv.get("period") or {}
     year = int(period.get("year", 0) or 0)
     month = int(period.get("month", 0) or 0)
@@ -1535,24 +1187,19 @@ def export_quickbooks_invoicing_csv(
     except Exception:
         invoice_no = 1
 
-    # Invoice/Due date = last day of invoice month
     invoice_date = _last_day_of_month(year, month)
     due_date = invoice_date
-
-    # Service Date = today's date when file is generated
     service_date = date.today()
 
     inv_date_s = _fmt_us_date(invoice_date)
     due_date_s = _fmt_us_date(due_date)
     service_date_s = _fmt_us_date(service_date)
 
-    # ----- map sites -> divisions, in client/division/site order -----
     clients_doc = _load_clients_doc()
     div_order, site_map = _build_site_division_index_for_client(
         clients_doc, client_name
     )
 
-    # Group line items by division, preserving site order
     by_div: dict[str, list[tuple[int, int, Dict[str, Any]]]] = {}
     leftovers: list[Dict[str, Any]] = []
 
@@ -1566,7 +1213,6 @@ def export_quickbooks_invoicing_csv(
         dname, di, si = info
         by_div.setdefault(dname, []).append((di, si, li))
 
-    # ----- assemble rows -----
     rows: list[list[str]] = []
 
     def _add_invoice_for_division(
@@ -1574,11 +1220,9 @@ def export_quickbooks_invoicing_csv(
         items: list[tuple[int, int, Dict[str, Any]]],
         current_invoice_no: int,
     ) -> int:
-        """Append rows for a single division and return next invoice number."""
         if not items:
             return current_invoice_no
 
-        # sort by site index within that division
         items_sorted = sorted(items, key=lambda t: t[1])
 
         first = True
@@ -1593,50 +1237,44 @@ def export_quickbooks_invoicing_csv(
             amt = float(li.get("amount", 0) or 0.0)
 
             row: list[str] = []
-            # InvoiceNo always present on every row
             row.append(str(current_invoice_no))
 
             if first:
-                # First row for this invoice: fill invoice-level fields
                 row.extend([
-                    client_name,         # *Customer
-                    inv_date_s,          # *InvoiceDate
-                    due_date_s,          # *DueDate
-                    "Due on Receipt",    # Terms
-                    "",                  # Location
-                    "",                  # Memo
+                    client_name,
+                    inv_date_s,
+                    due_date_s,
+                    "Due on Receipt",
+                    "",
+                    "",
                 ])
                 first = False
             else:
-                # Subsequent rows: blank invoice-level fields
                 row.extend(["", "", "", "", "", ""])
 
             row.extend([
-                "Services",                        # Item(Product/Service)
-                str(li.get("description", "")),    # ItemDescription
-                qty,                               # ItemQuantity
-                f"{rate:.2f}",                     # ItemRate
-                f"{amt:.2f}",                      # *ItemAmount
-                service_date_s,                    # Service Date
+                "Services",
+                str(li.get("description", "")),
+                qty,
+                f"{rate:.2f}",
+                f"{amt:.2f}",
+                service_date_s,
             ])
             rows.append(row)
 
         return current_invoice_no + 1
 
-    # 1) Divisions in clients.json order
     for dname in div_order:
         items = by_div.get(dname)
         if not items:
             continue
         invoice_no = _add_invoice_for_division(dname, items, invoice_no)
 
-    # 2) Any items we couldn't map to a division: each becomes its own invoice
     for li in leftovers:
         invoice_no = _add_invoice_for_division(
             "(Unassigned)", [(0, 0, li)], invoice_no
         )
 
-    # ----- write CSV -----
     out_dir = _ensure_out_dir_for_invoice(inv, out_dir)
     csv_path = out_dir / csv_name
 
@@ -1648,31 +1286,16 @@ def export_quickbooks_invoicing_csv(
     return csv_path
 
 
-
-
-# === END: exporter decoration helpers ===
-
-
 def export_division_pdfs(
     inv: Dict[str, Any],
     template_path: str | Path | None = None,
     out_dir: str | Path | None = None,
 ) -> list[Path]:
-    """Export one PDF per division for this invoice using the template if available.
-
-    - One PDF per division in clients.json order (skipping empty divisions).
-    - Leftover items (unmapped sites) go into an "(Unassigned)" PDF.
-    - Each division invoice gets a human_number that matches the QuickBooks logic.
-    """
-    # Resolve output directory (Monthly MM-DD-YYYY folder, etc.)
     if out_dir is None:
         try:
             out_dir_path = _ensure_out_dir_for_invoice(inv, None)
         except Exception:
-            try:
-                out_dir_path = invoice_output_dir()
-            except Exception:
-                out_dir_path = Path("invoices_output")
+            out_dir_path = invoice_output_dir()
     else:
         out_dir_path = Path(out_dir)
         out_dir_path.mkdir(parents=True, exist_ok=True)
@@ -1683,7 +1306,6 @@ def export_division_pdfs(
         clients_doc, client_name
     )
 
-    # Group line items by division
     by_div: dict[str, list[Dict[str, Any]]] = {}
     leftovers: list[Dict[str, Any]] = []
 
@@ -1707,14 +1329,12 @@ def export_division_pdfs(
 
     base_id = str(inv.get("id", ""))
 
-    # Decide if we can use the Excel template
     tpl: Path | None = None
     if template_path is not None:
         p = Path(template_path)
         if p.exists() and os.name == "nt":
             tpl = p
 
-    # Compute invoice numbers the same way as QuickBooks export
     start_no = inv.get("starting_invoice_number")
     try:
         current_invoice_no = int(start_no)
@@ -1722,12 +1342,10 @@ def export_division_pdfs(
         current_invoice_no = 1
 
     def _make_pdf(div_inv: Dict[str, Any]) -> Path:
-        # Use Excel template when available, otherwise fallback PDF
         if tpl is not None:
             path = export_invoice_pdf_via_template(
                 div_inv, tpl, out_dir=out_dir_path
             )
-            # Clean up intermediate xlsm/xlsx/csv for this division
             stem = invoice_filename(div_inv, "xlsm").replace(".xlsm", "")
             for ext in (".xlsm", ".xlsx", ".csv"):
                 cand = out_dir_path / f"{stem}{ext}"
@@ -1740,7 +1358,6 @@ def export_division_pdfs(
         else:
             return export_invoice_pdf(div_inv, out_dir=out_dir_path)
 
-    # 1) Known divisions in clients.json order
     for dname in div_order:
         items = by_div.get(dname)
         if not items:
@@ -1751,15 +1368,11 @@ def export_division_pdfs(
         div_inv["totals"] = {}
         div_inv["id"] = f"{base_id}-{_slugify(dname)}"
         div_inv["human_number"] = current_invoice_no
-        try:
-            _recalc_totals(div_inv)
-        except Exception:
-            pass
+        recompute_totals(div_inv)
         pdf = _make_pdf(div_inv)
         results.append(pdf)
         current_invoice_no += 1
 
-    # 2) Leftovers as "(Unassigned)" if any
     if leftovers:
         dname = "(Unassigned)"
         div_inv = copy.deepcopy(inv)
@@ -1768,19 +1381,12 @@ def export_division_pdfs(
         div_inv["totals"] = {}
         div_inv["id"] = f"{base_id}-{_slugify('unassigned')}"
         div_inv["human_number"] = current_invoice_no
-        try:
-            _recalc_totals(div_inv)
-        except Exception:
-            pass
+        recompute_totals(div_inv)
         pdf = _make_pdf(div_inv)
         results.append(pdf)
 
     return results
 
-
-
-from pathlib import Path
-from typing import Any, Dict, List
 
 def export_invoice_pdf_via_template(
     inv: Dict[str, Any],
@@ -1796,23 +1402,20 @@ def export_invoice_pdf_via_template(
     if not tpl.exists():
         raise FileNotFoundError(f"Template not found: {tpl}")
 
-    # ----- resolve output directory -----
     if out_dir is None:
         try:
-            out_dir = invoice_output_dir()  # uses your existing helper
+            out_dir = invoice_output_dir()
         except Exception:
             out_dir = Path("invoices_output")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ----- load template -----
     wb = load_workbook(tpl, data_only=False, keep_vba=True)
     ws = wb.active
 
-    # ===== HEADER: INVOICE NUMBER =====
     invoice_number = (
-        inv.get("human_number")              # best: per-division number
-        or inv.get("qb_invoice_number")      # optional alias
+        inv.get("human_number")
+        or inv.get("qb_invoice_number")
         or inv.get("starting_invoice_number")
         or inv.get("id")
     )
@@ -1821,7 +1424,6 @@ def export_invoice_pdf_via_template(
     except Exception:
         pass
 
-    # ===== HEADER: DATES (TODAY) =====
     today = datetime.today()
     for cell in ("H5", "H7"):
         try:
@@ -1830,7 +1432,6 @@ def export_invoice_pdf_via_template(
         except Exception:
             pass
 
-    # ===== TERMS =====
     try:
         val = ws["H8"].value
         if val is None or str(val).strip() == "":
@@ -1838,27 +1439,20 @@ def export_invoice_pdf_via_template(
     except Exception:
         pass
 
-    # ===== BILL-TO (A8..A10) =====
     def _bill_to_lines() -> List[str]:
-        # Try clients.json via helpers first
         try:
-            load_clients = globals().get("_load_clients_doc")
-            find_addr = globals().get("_find_client_address")
-            if callable(load_clients) and callable(find_addr):
-                doc = load_clients()
-                client_name = (
-                    inv.get("client_name_snapshot")
-                    or inv.get("client_name")
-                    or ""
-                )
-                lines = find_addr(doc, client_name)
-                if isinstance(lines, list) and lines:
-                    return [str(x) for x in lines][:3]
+            doc = _load_clients_doc()
+            client_name = (
+                inv.get("client_name_snapshot")
+                or inv.get("client_name")
+                or ""
+            )
+            lines = _find_client_address(doc, client_name)
+            if isinstance(lines, list) and lines:
+                return [str(x) for x in lines][:3]
         except Exception:
-            # fall through to inline data
             pass
 
-        # Fallback: use invoice-embedded client info
         name = (
             inv.get("client_name_snapshot")
             or inv.get("client_name")
@@ -1888,7 +1482,6 @@ def export_invoice_pdf_via_template(
     except Exception:
         pass
 
-    # ===== LINE ITEMS =====
     row = 13
     line_items = inv.get("line_items", [])
     if not isinstance(line_items, list) or not line_items:
@@ -1897,7 +1490,6 @@ def export_invoice_pdf_via_template(
     for li in line_items:
         try:
             raw_desc = li.get("description", "")
-            # decorate_with_last4_kind already exists in this module
             desc = decorate_with_last4_kind(inv, raw_desc)
         except Exception:
             desc = li.get("description", "")
@@ -1914,11 +1506,10 @@ def export_invoice_pdf_via_template(
 
     last_item_row = max(13, row - 1)
 
-    # ===== SUBTOTAL / TOTAL FORMULAS =====
     def _find_label_row(label: str) -> int | None:
         L = label.strip().upper()
         for r in range(13, 200):
-            for c in range(1, 8):  # A..G
+            for c in range(1, 8):
                 v = ws.cell(row=r, column=c).value
                 if isinstance(v, str) and v.strip().upper() == L:
                     return r
@@ -1927,9 +1518,7 @@ def export_invoice_pdf_via_template(
     subtotal_row = _find_label_row("SUBTOTAL")
     total_row = _find_label_row("TOTAL")
 
-    # Clear trailing rows between last item and subtotal
     start_clear = last_item_row + 1
-    stop_clear = subtotal_row if subtotal_row else start_clear
     if subtotal_row and start_clear < subtotal_row:
         for r in range(start_clear, subtotal_row):
             for col in ("A", "F", "G", "H"):
@@ -1938,7 +1527,6 @@ def export_invoice_pdf_via_template(
                 except Exception:
                     pass
 
-    # Subtotal formula
     subtotal_formula = f"=SUM(H13:H{last_item_row})"
     try:
         if subtotal_row:
@@ -1951,7 +1539,6 @@ def export_invoice_pdf_via_template(
     except Exception:
         pass
 
-    # Total formula
     try:
         if total_row:
             cell = ws[f"H{total_row}"]
@@ -1962,7 +1549,6 @@ def export_invoice_pdf_via_template(
     except Exception:
         pass
 
-    # ===== SAVE & EXPORT TO PDF VIA EXCEL COM =====
     xlsm_path = out_dir / invoice_filename(inv, "xlsm")
     wb.save(xlsm_path)
 
@@ -1983,15 +1569,11 @@ def export_invoice_pdf_via_template(
         ) from e
 
 
-
-
-# === BEGIN: message billing by segments (idempotent) ===
-from typing import Any, Dict, Iterable, List, Tuple
-import csv
-from pathlib import Path as _Path_seg
+# ======================================================================
+# Message billing by segments (UPDATED to use make_site_description)
+# ======================================================================
 
 def _ceil_div2(n: int) -> int:
-    """1–2→1, 3–4→2, 5–6→3, 7–8→4, ..."""
     try:
         x = int(float(n))
     except Exception:
@@ -2001,7 +1583,6 @@ def _ceil_div2(n: int) -> int:
     return (x + 1) // 2
 
 def _extract_num_segments(row: Dict[str, Any]) -> int:
-    """Robustly read NumSegments (handles common header variants)."""
     candidates = ("NumSegments", "Numsegments", "numsegments",
                   "Num_Segments", "NumSeg", "Numseg", "Segments", "segments")
     for k in candidates:
@@ -2012,23 +1593,17 @@ def _extract_num_segments(row: Dict[str, Any]) -> int:
                 continue
     return 1
 
-def _sum_billed_units_by_site(files_with_sites: List[Tuple[str | _Path_seg, str | None]],
+def _sum_billed_units_by_site(files_with_sites: List[Tuple[str | Path, str | None]],
                               year: int, month: int) -> Dict[str, int]:
-    """
-    Open each messages CSV and compute billed units per site:
-      billed_units(row) = ceil(NumSegments/2) for rows in (year, month).
-    Returns {site_name: total_billed_units}.
-    """
     from collections import defaultdict
     totals: Dict[str, int] = defaultdict(int)
 
     for path, site_name in (files_with_sites or []):
-        site = site_name or _Path_seg(path).stem
+        site = site_name or Path(path).stem
         try:
             with open(path, newline='', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    # Use your existing helper to parse row timestamp for messages
                     try:
                         dt = _extract_row_datetime(row, "messages")
                     except Exception:
@@ -2038,72 +1613,34 @@ def _sum_billed_units_by_site(files_with_sites: List[Tuple[str | _Path_seg, str 
                     seg = _extract_num_segments(row)
                     totals[site] += _ceil_div2(seg)
         except Exception:
-            # swallow unreadable files silently
             pass
     return dict(totals)
 
 def add_message_items_to_invoice(
     inv: dict,
-    messages_with_sites: List[Tuple[str | _Path_seg, str | None]],
+    messages_with_sites: List[Tuple[str | Path, str | None]],
     year: int,
     month: int,
-    unit_price: float = 0.14,  # per your new rule
+    unit_price: float = 0.14,
 ) -> None:
-    """
-    Add one SMS line per site with:
-      - description: "<Site Name> SMS" (export adds (-LAST4) while keeping SMS label)
-      - qty: sum( ceil(NumSegments/2) ) for rows in (year, month)
-      - unit_price: default 0.14
-    """
     billed = _sum_billed_units_by_site(messages_with_sites, year, month)
 
     for site, qty in _ordered_site_items(billed):
         if qty <= 0:
             continue
         base = (site or "").strip()
-        if base.upper().endswith("SMS"):
-            desc = base
-        else:
-            desc = f"{base} SMS" if base else "SMS"
-        try:
-            _add_item(inv, desc, qty, unit_price)
-        except NameError:
-            inv.setdefault("line_items", []).append({
-                "description": desc,
-                "qty": qty,
-                "unit_price": unit_price,
-            })
+        desc = make_site_description(base, "SMS") if base else "SMS"
+        _add_item(inv, desc, qty, unit_price)
+
+    recompute_totals(inv)
 
 
-    # Recompute totals in-memory (Excel still computes H=F*G)
-    try:
-        _recalc_totals(inv)
-    except Exception:
-        try:
-            _recompute_totals(inv)
-        except Exception:
-            pass
-
-# === END: message billing by segments ===
-from pathlib import Path
-import csv
-
-# --- Full CSV → PDF (all rows, wide table) --------------------
-from pathlib import Path
-import csv
+# ======================================================================
+# Full CSV → PDF (unchanged)
+# ======================================================================
 
 def export_invoice_csv_full_pdf(csv_path: str | Path,
                                 out_dir: str | Path | None = None) -> Path:
-    """
-    Take an invoice CSV (whatever finalize_with_template/export_invoice_csv wrote)
-    and render ALL rows into a single PDF as one big table.
-
-    - First row is treated as a header and repeats on each page.
-    - PDF is landscape to fit many columns.
-    - Output filename: <csv_stem>-full.pdf in the same folder by default.
-
-    Returns the PDF path.
-    """
     try:
         from reportlab.lib.pagesizes import letter, landscape
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
@@ -2121,7 +1658,6 @@ def export_invoice_csv_full_pdf(csv_path: str | Path,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read entire CSV
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f)
         rows = list(reader)
@@ -2129,11 +1665,9 @@ def export_invoice_csv_full_pdf(csv_path: str | Path,
     if not rows:
         raise ValueError(f"CSV appears to be empty: {csv_path}")
 
-    # Normalize row lengths so the table is rectangular
     max_cols = max(len(r) for r in rows)
     norm_rows = [r + [""] * (max_cols - len(r)) for r in rows]
 
-    # Output PDF path: same name + '-full.pdf'
     pdf_path = out_dir / (csv_path.stem + "-full.pdf")
 
     doc = SimpleDocTemplate(

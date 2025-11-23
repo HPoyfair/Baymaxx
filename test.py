@@ -1,32 +1,25 @@
 from pathlib import Path
-from invoicing import identify_csv_and_phone, count_rows_calls_csv, _load_clients_doc
-
-BASE_DIR = Path(r"C:\Users\HaydenP\Downloads\drive-download-20251103T211628Z-1-001")
-YEAR = 2025
-MONTH = 10
+import json
+from invoicing import identify_csv_and_phone, _load_clients_doc
 
 def main():
-    clients_doc = _load_clients_doc(None)
-    total_unknown = 0
+    clients_doc = _load_clients_doc()
 
-    print(f"=== Per-CSV call counts for {YEAR}-{MONTH:02d} (with site) ===")
-    for csv_path in sorted(BASE_DIR.glob("*.csv")):
-        info = identify_csv_and_phone(csv_path, clients_doc)
-        if info["kind"] != "calls":
-            continue
+    # point this to wherever your Twilio CSVs are
+    csv_dir = Path(r"C:\Users\HaydenP\Downloads\drive-download-2025...")
+    csvs = sorted(csv_dir.glob("*.csv"))
 
-        match = info.get("match") or {}
-        site = match.get("site_name")
-        qty = count_rows_calls_csv(csv_path, YEAR, MONTH)
-
-        label = "UNMATCHED → goes into 'Voice'" if not site else ""
-        print(f"{csv_path.name:60} site={repr(site):35} calls={qty:5} {label}")
-
-        if not site:
-            total_unknown += qty
-
-    print()
-    print("Total calls from UNMATCHED voice CSVs:", total_unknown)
+    for p in csvs:
+        info = identify_csv_and_phone(p, clients_doc)
+        m = info.get("match") or {}
+        print(
+            p.name,
+            "kind=", info.get("kind"),
+            "phone=", info.get("phone"),
+            "site=", m.get("site_name"),
+            "division=", m.get("division_name"),
+            "site_phone=", m.get("site_phone"),
+        )
 
 if __name__ == "__main__":
     main()
