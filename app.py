@@ -49,7 +49,8 @@ def _is_newer(remote: str, local: str) -> bool:
 
 def _fetch_manifest(url: str) -> dict:
     """Download and parse the update manifest JSON from GitHub."""
-    import urllib.request, urllib.error
+    import urllib.request, urllib.error, json  # <-- add json here
+
     req = urllib.request.Request(
         url,
         headers={
@@ -59,8 +60,9 @@ def _fetch_manifest(url: str) -> dict:
         },
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
-        data = resp.read().decode("utf-8")
-    return json.loads(data)
+        text = resp.read().decode("utf-8")
+    return json.loads(text)
+
 
 def _download_file(url: str, dest: Path, progress_cb=None) -> Path:
     """Download a file to dest, optionally calling progress_cb(downloaded, total)."""

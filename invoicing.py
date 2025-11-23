@@ -37,6 +37,17 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def _new_id() -> str:
     return str(uuid.uuid4())
 
+import sys
+from pathlib import Path
+
+def resource_path(*parts):
+    """
+    Get an absolute path to a bundled resource (works in dev + PyInstaller).
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
+
 
 # ======================================================================
 # Canonical line-item + totals helpers (SINGLE SOURCE OF TRUTH)
