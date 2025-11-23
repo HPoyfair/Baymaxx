@@ -83,6 +83,17 @@ def _download_file(url: str, dest: Path, progress_cb=None) -> Path:
                     progress_cb(downloaded, total)
     return dest
 
+import sys
+from pathlib import Path
+
+def resource_path(*parts):
+    """
+    Get an absolute path to a bundled resource (works in dev + PyInstaller).
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
+
 def check_for_updates_ui(parent: tk.Tk | None = None) -> None:
     """UI entrypoint: check GitHub manifest and optionally update."""
     try:
@@ -276,7 +287,8 @@ class App(tk.Tk):
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
 
-        logo_path = Path(__file__).resolve().parent / "baymaxx.png"
+        logo_path = resource_path("baymaxx.png")
+
         self.show_logo(logo_path)
 
         # Ensure an invoice root exists / is remembered
@@ -301,7 +313,8 @@ class App(tk.Tk):
         ClientsManager(self)
 
     def show_home(self) -> None:
-        self.show_logo(Path(__file__).resolve().parent / "baymaxx.png")
+        self.show_logo(resource_path("baymaxx.png"))
+
 
     def show_monthly_import(self) -> None:
         for child in self.content.winfo_children():
@@ -1253,19 +1266,27 @@ class MonthlyImportView(ttk.Frame):
             inv_obj["client_name_snapshot"] = parent_name  # invoicing.py will fill name+address under BILL TO
 
         # Locate invoice template next to app.py
-        template_candidates = [here / "invoice.xlsm", here / "Invoice Template HP.xlsm"]
-        template_path = None
-        for cand in template_candidates:
-            if cand.exists():
-                template_path = cand
-                break
+        # Locate invoice template (prefer one next to exe/app.py, else bundled)
+        template_candidates = [
+            here / "invoice.xlsm",
+            here / "Invoice Template HP.xlsm",
+            resource_path("invoice.xlsm"),
+            resource_path("Invoice Template HP.xlsm"),
+        ]
+
+        template_path = next((cand for cand in template_candidates if cand.exists()), None)
+
         if not template_path:
             messagebox.showwarning(
                 "Template not found",
-                "Couldn't find 'invoice.xlsm' or 'Invoice Template HP.xlsm' next to app.py.\n"
-                "I'll still generate a PDF with the fallback layout."
+                "Couldn't find 'invoice.xlsm' or 'Invoice Template HP.xlsm' "
+                "next to Baymaxx.exe or inside the app bundle.\n"
+                "I'll still generate PDFs with the fallback layout."
             )
-            template_path = here / "invoice.xlsm"  # finalize() will still run; Excel export will fallback
+            # placeholder so finalize_with_template still gets a string
+            template_path = here / "invoice.xlsm"
+
+
 
         # Run one-step pipeline to generate outputs
         try:
