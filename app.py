@@ -31,7 +31,7 @@ _importlib_local.reload(inv)  # ensure latest file is used
 # ================== App version & updater ==================
 import re
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 GITHUB_MANIFEST_URL = "https://raw.githubusercontent.com/HPoyfair/Baymaxx/main/manifest.json"
 
 
