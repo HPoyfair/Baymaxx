@@ -273,7 +273,8 @@ class App(tk.Tk):
                    command=self.show_monthly_import).pack(fill="x", pady=6)
         ttk.Button(sidebar, text="View Past Invoices",
                    command=self.show_invoices).pack(fill="x", pady=6)
-        ttk.Button(sidebar, text="New Individual Invoice").pack(fill="x", pady=6)
+        ttk.Button(sidebar, text="Options", command=self.open_options).pack(fill="x", pady=6)
+
         ttk.Button(sidebar, text="View Clients",
                    command=self.open_clients_manager).pack(fill="x", pady=6)
         ttk.Separator(sidebar, orient="horizontal").pack(fill="x", pady=(10, 6))
@@ -316,6 +317,9 @@ class App(tk.Tk):
         self.show_logo(resource_path("baymaxx.png"))
 
 
+    
+
+
     def show_monthly_import(self) -> None:
         for child in self.content.winfo_children():
             child.destroy()
@@ -327,6 +331,88 @@ class App(tk.Tk):
             child.destroy()
         view = ViewInvoicesView(self.content, on_back=self.show_home)
         view.grid(row=0, column=0, sticky="nsew")
+
+    def open_options(self):
+        import json
+        from pathlib import Path
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+
+        # Use the same settings file invoicing.py uses
+        try:
+            settings_path = inv.SETTINGS_PATH  # type: ignore[attr-defined]
+        except Exception:
+            settings_path = Path(__file__).resolve().parent / "data" / "invoicing_settings.json"
+
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def load_settings() -> dict:
+            if settings_path.exists():
+                try:
+                    return json.loads(settings_path.read_text(encoding="utf-8"))
+                except Exception:
+                    return {}
+            return {}
+
+        def save_settings(data: dict) -> None:
+            settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        settings = load_settings()
+
+        sms_rate_var = tk.StringVar(value=str(settings.get("sms_rate", 0.14)))
+        voice_rate_var = tk.StringVar(value=str(settings.get("voice_rate", 0.14)))
+
+        # ✅ App is the root, so parent the window to self (not self.root)
+        win = tk.Toplevel(self)
+        win.title("Options")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Set unit prices (USD):").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
+        )
+
+        ttk.Label(frm, text="SMS rate").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=sms_rate_var, width=12).grid(row=1, column=1, sticky="e")
+
+        ttk.Label(frm, text="VOICE rate").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(frm, textvariable=voice_rate_var, width=12).grid(
+            row=2, column=1, sticky="e", pady=(6, 0)
+        )
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def on_save():
+            try:
+                sms = float(sms_rate_var.get().strip())
+                voice = float(voice_rate_var.get().strip())
+                if sms < 0 or voice < 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror(
+                    "Invalid value",
+                    "Rates must be valid non-negative numbers (example: 0.14).",
+                    parent=win,
+                )
+                return
+
+            # don't overwrite other settings (like starting invoice number)
+            settings["sms_rate"] = sms
+            settings["voice_rate"] = voice
+            save_settings(settings)
+
+            messagebox.showinfo("Saved", "Rates saved successfully.", parent=win)
+            win.destroy()
+
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Save", command=on_save).pack(side="right", padx=(0, 8))
+
+
 
 
 # ---------------- Clients Manager ----------------
@@ -1162,7 +1248,7 @@ class MonthlyImportView(ttk.Frame):
     def on_continue(self):
         """
         Verify CSVs for the selected month/year, build invoice,
-        add Voice line items (qty = row count, $0.14 each) and Message line items likewise,
+        add Voice line items and Message line items,
         then run a single finalize_with_template() that:
         - saves JSON (internal)
         - exports CSV (user folder)
@@ -1179,6 +1265,7 @@ class MonthlyImportView(ttk.Frame):
         bad = []
         calls_with_sites = []
         messages_with_sites = []
+
         for iid in self.tree.get_children():
             tags = set(self.tree.item(iid, "tags") or ())
             path = Path(self.tree.set(iid, "file"))
@@ -1210,11 +1297,52 @@ class MonthlyImportView(ttk.Frame):
             except Exception:
                 pass
 
-        # Add voice and message line items
+        # ----------------------------
+        # Load unit prices from settings (Options)
+        # ----------------------------
+        sms_rate = getattr(inv, "UNIT_PRICE_SMS", 0.14)
+        voice_rate = getattr(inv, "UNIT_PRICE_VOICE", 0.14)
+
+        settings = {}
+        try:
+            # preferred: whatever invoicing.py uses internally
+            if hasattr(inv, "_load_settings"):
+                settings = inv._load_settings() or {}
+        except Exception:
+            settings = {}
+
+        # fallback: read the same file your Options window writes
+        if not settings:
+            try:
+                settings_path = Path("data") / "invoicing_settings.json"
+                if settings_path.exists():
+                    import json
+                    settings = json.loads(settings_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                settings = {}
+
+        try:
+            if "sms_rate" in settings:
+                sms_rate = float(settings.get("sms_rate"))
+        except Exception:
+            pass
+
+        try:
+            if "voice_rate" in settings:
+                voice_rate = float(settings.get("voice_rate"))
+        except Exception:
+            pass
+
+        # snapshot onto the invoice object (helps if any later step wants these)
+        inv_obj["sms_rate"] = sms_rate
+        inv_obj["voice_rate"] = voice_rate
+
+        # Add voice and message line items using the loaded rates
         if calls_with_sites:
-            inv.add_voice_items_to_invoice(inv_obj, calls_with_sites, y, m, inv.UNIT_PRICE_VOICE)
+            inv.add_voice_items_to_invoice(inv_obj, calls_with_sites, y, m, voice_rate)
+
         if messages_with_sites:
-            inv.add_message_items_to_invoice(inv_obj, messages_with_sites, y, m, inv.UNIT_PRICE_SMS)
+            inv.add_message_items_to_invoice(inv_obj, messages_with_sites, y, m, sms_rate)
 
         # Decorate descriptions with phone last4 from match column
         import re as _re, json
@@ -1265,7 +1393,6 @@ class MonthlyImportView(ttk.Frame):
         if parent_name:
             inv_obj["client_name_snapshot"] = parent_name  # invoicing.py will fill name+address under BILL TO
 
-        # Locate invoice template next to app.py
         # Locate invoice template (prefer one next to exe/app.py, else bundled)
         template_candidates = [
             here / "invoice.xlsm",
@@ -1283,15 +1410,11 @@ class MonthlyImportView(ttk.Frame):
                 "next to Baymaxx.exe or inside the app bundle.\n"
                 "I'll still generate PDFs with the fallback layout."
             )
-            # placeholder so finalize_with_template still gets a string
             template_path = here / "invoice.xlsm"
-
-
 
         # Run one-step pipeline to generate outputs
         try:
             paths = inv.finalize_with_template(inv_obj, str(template_path))
-
         except Exception as e:
             messagebox.showerror("Invoice error", f"Failed to create invoice:\n{e}")
             return

@@ -1,4 +1,6 @@
 {
   "invoice_root": "C:\\Users\\hayde\\Baymaxx Invoices",
-  "starting_invoice_number": 3
+  "starting_invoice_number": 3,
+  "sms_rate": 0.14,
+  "voice_rate": 0.14
 }
