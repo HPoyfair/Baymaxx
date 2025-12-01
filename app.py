@@ -264,7 +264,7 @@ class App(tk.Tk):
         # ---- top bar
         topbar = ttk.Frame(self, padding=(12, 8))
         topbar.grid(row=0, column=0, columnspan=2, sticky="ew")
-        ttk.Label(topbar, text="help").grid(row=0, column=0, sticky="w")
+        ttk.Label(topbar, text="Baymax").grid(row=0, column=0, sticky="w")
 
         # ---- left sidebar (buttons)
         sidebar = ttk.Frame(self, padding=(10, 10))

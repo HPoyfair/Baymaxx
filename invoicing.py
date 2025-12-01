@@ -866,12 +866,34 @@ def add_voice_items_to_invoice(inv: Dict[str, Any],
 # Export helpers + PDF/CSV
 # ======================================================================
 
-def invoice_filename(inv: Dict[str, Any], ext: str) -> str:
+import re
+
+_INVALID = r'[\\/:*?"<>|]'
+
+def _sanitize_filename(s: str) -> str:
+    # remove Windows-invalid filename chars, but DO NOT strip spaces
+    return re.sub(_INVALID, "", s)
+
+def invoice_filename(inv: dict, ext: str) -> str:
+    ext_clean = ext.lstrip(".").lower()
+
+    # ✅ Custom naming for division PDFs (and xlsm, if you want the intermediate named similarly)
+    if ext_clean in {"pdf", "xlsm"} and inv.get("division_name"):
+        invoice_no = inv.get("human_number") or inv.get("qb_invoice_number") or inv.get("id") or ""
+        division_name = inv.get("division_name") or ""
+
+        division7 = division_name[:7].ljust(7, " ")  # KEEP/PAD spaces to exactly 7 chars
+        name = f"({invoice_no}) MS - Sante - {division7}.{ext_clean}"
+
+        return _sanitize_filename(name)
+
+    # fallback for other files (csv/json/etc)
     per = inv.get("period") or {}
     y = per.get("year")
     m = per.get("month")
     ym = f"{y}-{int(m):02d}" if y and m else "unknown"
-    return f"Invoice-{ym}-{inv.get('id','')}.{ext.lstrip('.')}"
+    return f"Invoice-{ym}-{inv.get('id','')}.{ext_clean}"
+
 
 
 def export_invoice_csv(inv: Dict[str, Any], out_dir: str | Path | None = None) -> Path:
@@ -1198,9 +1220,11 @@ def export_quickbooks_invoicing_csv(
     except Exception:
         invoice_no = 1
 
-    invoice_date = _last_day_of_month(year, month)
-    due_date = invoice_date
-    service_date = date.today()
+    # ✅ swapped behavior:
+    today = date.today()
+    service_date = _last_day_of_month(year, month)  # end of invoice month
+    invoice_date = today                            # generation day
+    due_date = today                                # generation day
 
     inv_date_s = _fmt_us_date(invoice_date)
     due_date_s = _fmt_us_date(due_date)
@@ -1295,6 +1319,7 @@ def export_quickbooks_invoicing_csv(
         w.writerows(rows)
 
     return csv_path
+
 
 
 def export_division_pdfs(
@@ -1405,9 +1430,11 @@ def export_invoice_pdf_via_template(
     out_dir: str | Path | None = None,
     clients_path: str | Path | None = None,
 ) -> Path:
+    import re
     import openpyxl
     from openpyxl import load_workbook
     from datetime import datetime
+    from pathlib import Path
 
     tpl = Path(template_path)
     if not tpl.exists():
@@ -1452,28 +1479,16 @@ def export_invoice_pdf_via_template(
 
     def _bill_to_lines() -> List[str]:
         try:
-            doc = _load_clients_doc()
-            client_name = (
-                inv.get("client_name_snapshot")
-                or inv.get("client_name")
-                or ""
-            )
+            doc = _load_clients_doc() if clients_path is None else _load_clients_doc(Path(clients_path))
+            client_name = inv.get("client_name_snapshot") or inv.get("client_name") or ""
             lines = _find_client_address(doc, client_name)
             if isinstance(lines, list) and lines:
                 return [str(x) for x in lines][:3]
         except Exception:
             pass
 
-        name = (
-            inv.get("client_name_snapshot")
-            or inv.get("client_name")
-            or ""
-        )
-        addr = (
-            inv.get("client_address_snapshot")
-            or inv.get("client_address")
-            or ""
-        )
+        name = inv.get("client_name_snapshot") or inv.get("client_name") or ""
+        addr = inv.get("client_address_snapshot") or inv.get("client_address") or ""
 
         out: List[str] = []
         if name:
@@ -1483,7 +1498,6 @@ def export_invoice_pdf_via_template(
                 line = line.strip()
                 if line:
                     out.append(line)
-
         return out[:3]
 
     try:
@@ -1566,11 +1580,28 @@ def export_invoice_pdf_via_template(
     pdf_path = out_dir / invoice_filename(inv, "pdf")
     try:
         import win32com.client  # type: ignore
+
         excel = win32com.client.Dispatch("Excel.Application")
         excel.Visible = False
+        excel.DisplayAlerts = False
+
         wb_com = excel.Workbooks.Open(str(xlsm_path))
+
+        # --- CRITICAL: prevent right-side clipping (the "INVOICE" text being cut off) ---
+        try:
+            ws_com = wb_com.Worksheets(1)  # assumes the invoice is on the first worksheet
+            ps = ws_com.PageSetup
+            ps.Zoom = False
+            ps.FitToPagesWide = 1
+            ps.FitToPagesTall = False
+        except Exception:
+            # If PageSetup tweak fails, still attempt export
+            pass
+        # ------------------------------------------------------------------------------
+
         xlTypePDF = 0
         wb_com.ExportAsFixedFormat(xlTypePDF, str(pdf_path))
+
         wb_com.Close(False)
         excel.Quit()
         return pdf_path
